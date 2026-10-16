@@ -1,5 +1,6 @@
 import os
 from typing import Optional
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,7 +19,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./udemy_subtitles.db"
 
     # Security
-    SECRET_KEY: str = "udemy-subtitle-manager-secret-key-min-32-chars-long"
+    SECRET_KEY: str = Field(min_length=32)
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
 

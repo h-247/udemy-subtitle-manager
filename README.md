@@ -199,13 +199,14 @@ erDiagram
    Create `.env` in the root or `backend/` directory based on `.env.example`:
    ```env
    DATABASE_URL=sqlite:///./udemy_subtitles.db
-   SECRET_KEY=udemy-subtitle-manager-secret-key-change-in-production-min-32-chars
+   SECRET_KEY=<random value with at least 32 characters>
    FRONTEND_URL=http://localhost:3000
    GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
    GOOGLE_CLIENT_SECRET=your-google-client-secret
    GOOGLE_REDIRECT_URI=http://localhost:8000/api/drive/callback
    GOOGLE_DRIVE_FOLDER_NAME=Udemy Subtitles
    ```
+   Generate a value with `python -c "import secrets; print(secrets.token_urlsafe(48))"` and replace the `SECRET_KEY` placeholder. The server refuses to start when the key is missing or shorter than 32 characters.
 
 4. **Run Alembic database migrations:**
    ```powershell

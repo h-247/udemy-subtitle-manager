@@ -27,7 +27,7 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-udemy_subtitles}
-      - SECRET_KEY=${SECRET_KEY:-udemy_subtitle_manager_secret_key_min_32_chars}
+      - SECRET_KEY=${SECRET_KEY:?Set SECRET_KEY in .env to a random value with at least 32 characters}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/drive/callback}
