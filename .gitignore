@@ -28,9 +28,10 @@ htmlcov/
 # Node.js & Next.js
 node_modules/
 frontend/node_modules/
+sites/udemy-subtitle-manager/
 .next/
 out/
-build/
+/frontend/build/
 dist/
 *.tsbuildinfo
 npm-debug.log*

@@ -180,6 +180,14 @@ erDiagram
 
 ---
 
+## ChatGPT Sites Edition
+
+The deployed Sites edition is available at [udemy-subtitle-manager.h-247.chatgpt.site](https://udemy-subtitle-manager.h-247.chatgpt.site) and is restricted to the owner's ChatGPT account. Its Worker backend uses D1 for account-scoped courses, lectures, jobs, and OAuth state, and R2 for subtitle files. The source and runtime setup are in [`chatgpt-sites/udemy-subtitle-manager`](chatgpt-sites/udemy-subtitle-manager/README.md); the FastAPI application remains available for local or conventional hosting.
+
+The Sites edition uses ChatGPT sign-in in place of the repository's local password/JWT flow. Imports, subtitle processing, Udemy connection management, ChatGPT links, and Google Drive sync are implemented in the Worker. Persistent jobs advance as the dashboard polls. Add `https://udemy-subtitle-manager.h-247.chatgpt.site/api/drive/callback` to the Google OAuth client's authorized redirect URIs before connecting Drive.
+
+---
+
 ## 💻 Direct Local Development Setup (Windows 11 PowerShell)
 
 ### 1. Backend Setup
