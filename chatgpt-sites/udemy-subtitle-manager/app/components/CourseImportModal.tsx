@@ -2,12 +2,13 @@
 
 import React, { useState } from "react";
 import { api } from "../lib/api";
+import { ProcessingJob } from "../types";
 import { X, BookOpen, AlertCircle, Loader2 } from "lucide-react";
 
 interface CourseImportModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSuccess: (message: string) => void;
+  onSuccess: (message: string, job: ProcessingJob) => void;
 }
 
 export default function CourseImportModal({ isOpen, onClose, onSuccess }: CourseImportModalProps) {
@@ -26,7 +27,7 @@ export default function CourseImportModal({ isOpen, onClose, onSuccess }: Course
 
     try {
       const job = await api.courses.importCourse(url.trim());
-      onSuccess(`Import job started (Job #${job.id}). Fetching curriculum in background...`);
+      onSuccess(`Import started for Job #${job.id}. You can follow its progress below.`, job);
       setUrl("");
       onClose();
     } catch (err: unknown) {

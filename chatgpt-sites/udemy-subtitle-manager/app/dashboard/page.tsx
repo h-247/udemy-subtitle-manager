@@ -425,10 +425,11 @@ function CoursesListContent() {
       <CourseImportModal
         isOpen={isImportOpen}
         onClose={() => setIsImportOpen(false)}
-        onSuccess={(msg) => {
+        onSuccess={(msg, job) => {
           setToastMessage(msg);
-          loadJobs();
-          loadCourses(true);
+          setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)].slice(0, 10));
+          void loadJobs();
+          void loadCourses(true);
         }}
       />
 

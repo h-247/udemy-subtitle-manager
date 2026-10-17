@@ -16,7 +16,8 @@ export default function JobProgressBar({ jobs, onCancelJob }: JobProgressBarProp
   return (
     <div className="space-y-3 mb-6">
       {activeJobs.map((job) => {
-        const percent = job.total_items > 0 ? Math.round((job.completed_items / job.total_items) * 100) : 0;
+        const hasKnownTotal = job.total_items > 0;
+        const percent = hasKnownTotal ? Math.round((job.completed_items / job.total_items) * 100) : 0;
 
         return (
           <div
@@ -50,17 +51,17 @@ export default function JobProgressBar({ jobs, onCancelJob }: JobProgressBarProp
             {/* Progress bar */}
             <div className="w-full bg-[#1A1A1A] h-2 rounded-full overflow-hidden border border-[#333333]">
               <div
-                className="bg-white h-full rounded-full transition-all duration-300"
-                style={{ width: `${Math.max(5, percent)}%` }}
+                className={`bg-white h-full rounded-full transition-all duration-300 ${!hasKnownTotal ? "animate-pulse" : ""}`}
+                style={{ width: hasKnownTotal ? `${Math.max(5, percent)}%` : "38%" }}
               />
             </div>
 
             <div className="flex justify-between items-center text-[11px] text-[#A3A3A3] mt-1.5">
               <span>
-                Items: {job.completed_items} / {job.total_items}
+                {hasKnownTotal ? `Items: ${job.completed_items} / ${job.total_items}` : `Lectures imported so far: ${job.completed_items}`}
                 {job.failed_items > 0 && <span className="text-rose-400 ml-1.5">({job.failed_items} failed)</span>}
               </span>
-              <span className="font-mono text-white font-medium">{percent}%</span>
+              {hasKnownTotal && <span className="font-mono text-white font-medium">{percent}%</span>}
             </div>
           </div>
         );

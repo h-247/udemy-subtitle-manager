@@ -353,7 +353,7 @@ async function courseRoutes(request: Request, user: UserRow, path: string[], url
     const normalized = validUdemyUrl(String(payload.url || ""));
     return json(await ensureJob(user.id, "COURSE_IMPORT", null, { url: normalized.url }, 1), 202);
   }
-  if (path.length === 1 && request.method === "GET") {
+  if (path.length === 0 && request.method === "GET") {
     const page = safeInt(url.searchParams.get("page"), 1, 1, 1_000_000);
     const pageSize = safeInt(url.searchParams.get("page_size"), 20, 1, 100);
     const search = (url.searchParams.get("search") || "").trim();
@@ -796,15 +796,21 @@ async function processSubtitle(user: UserRow, lecture: Row, language: string) {
 
 async function processPendingJob(userId: number) {
   const database = db();
-  const job = await database.prepare("SELECT * FROM processing_jobs WHERE user_id=? AND status IN ('PENDING','PROCESSING') ORDER BY created_at,id LIMIT 1").bind(userId).first<Row>();
+  const job = await database.prepare(`SELECT * FROM processing_jobs WHERE user_id=? AND (
+    status='PENDING' OR (status='PROCESSING' AND job_type='SUBTITLE_BATCH') OR
+    (status='PROCESSING' AND job_type='COURSE_IMPORT' AND updated_at < datetime('now','-1 minute'))
+  ) ORDER BY created_at,id LIMIT 1`).bind(userId).first<Row>();
   if (!job) return;
   const payload = JSON.parse(job.payload_json || "{}");
-  await database.prepare("UPDATE processing_jobs SET status='PROCESSING',updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(job.id).run();
   if (job.job_type === "COURSE_IMPORT") {
-    await importCourseJob(job, payload);
+    const claimed = await database.prepare(`UPDATE processing_jobs SET status='PROCESSING',updated_at=CURRENT_TIMESTAMP
+      WHERE id=? AND (status='PENDING' OR updated_at < datetime('now','-1 minute'))`).bind(job.id).run();
+    if (!claimed.meta.changes) return;
+    await importCourseStep(job, payload);
     return;
   }
   if (job.job_type !== "SUBTITLE_BATCH") return;
+  await database.prepare("UPDATE processing_jobs SET status='PROCESSING',updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(job.id).run();
   const ids: number[] = payload.lecture_ids || [];
   const cursor = Number(payload.cursor || 0);
   if (cursor >= ids.length) {
@@ -842,88 +848,145 @@ async function readCourseApi(url: string, jar: Record<string, string>) {
   return response.json() as Promise<Row>;
 }
 
-async function importCourseJob(job: Row, payload: Row) {
+async function importCourseStep(job: Row, payload: Row) {
   const database = db();
   try {
-    const parsed = validUdemyUrl(payload.url);
+    const saveStep = async (nextPayload: Row, message: string, courseId: number | null = null, complete = false) => {
+      const found = Number(nextPayload.lecture_count || 0);
+      await database.prepare(`UPDATE processing_jobs SET course_id=COALESCE(?,course_id),status=?,completed_items=?,total_items=?,payload_json=?,progress_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+        .bind(courseId, complete ? "COMPLETED" : "PENDING", complete ? Math.max(1, found) : found, complete ? Math.max(1, found) : 0,
+          JSON.stringify(nextPayload), message, job.id).run();
+    };
+
+    if (!payload.stage || payload.stage === "details") {
+      await database.prepare("UPDATE processing_jobs SET progress_message='Connecting to Udemy and reading course details.',updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(job.id).run();
+      const parsed = validUdemyUrl(payload.url);
+      const session = await getUdemySession(Number(job.user_id));
+      const cookies = session?.encrypted_cookie_data ? await getCookieBundle(Number(job.user_id)) : null;
+      const domain = cookies?.businessDomain || parsed.domain;
+      const courseFields = new URLSearchParams({ "fields[course]": "id,title,headline,image_480x270,visible_instructors,url" });
+      const readWithTimeout = async (host: string) => {
+        const response = await udemyFetch(`https://${host}/api-2.0/courses/${encodeURIComponent(parsed.slug)}/?${courseFields}`, cookies?.jar || {}, { signal: AbortSignal.timeout(12000) });
+        if (!response.ok) throw new ApiError(response.status === 404 ? 404 : response.status === 401 ? 401 : response.status === 403 ? 403 : 502,
+          response.status === 401 ? "Udemy session expired or is not enrolled in this course." : response.status === 403 ? "Udemy denied access to this course." : `Udemy returned HTTP ${response.status}.`);
+        return response.json() as Promise<Row>;
+      };
+      let details: Row;
+      try { details = await readWithTimeout(domain); }
+      catch (error) { if (domain === "www.udemy.com") throw error; details = await readWithTimeout("www.udemy.com"); }
+      const courseId = String(details.id);
+      const canonicalUrl = details.url?.startsWith("/") ? `https://${domain}${details.url}` : parsed.url;
+      const instructor = details.visible_instructors?.[0]?.display_name || null;
+      const existing = await database.prepare("SELECT id FROM courses WHERE user_id=? AND course_id=?").bind(job.user_id, courseId).first<Row>();
+      let localCourseId: number;
+      if (existing) {
+        localCourseId = Number(existing.id);
+        await database.prepare("UPDATE courses SET title=?,url=?,instructor=?,thumbnail_url=?,last_synced_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+          .bind(details.title || parsed.slug, canonicalUrl, instructor, details.image_480x270 || null, now(), localCourseId).run();
+      } else {
+        const inserted = await database.prepare("INSERT INTO courses (user_id,course_id,title,url,instructor,thumbnail_url,last_synced_at) VALUES (?,?,?,?,?,?,?)")
+          .bind(job.user_id, courseId, details.title || parsed.slug, canonicalUrl, instructor, details.image_480x270 || null, now()).run();
+        localCourseId = Number(inserted.meta.last_row_id);
+      }
+      const hosts = [...new Set([domain, "www.udemy.com"] as string[])];
+      const endpoints = [...(cookies ? ["subscriber-curriculum-items"] : []), "public-curriculum-items"];
+      await saveStep({ ...payload, stage: "curriculum", domain, slug: parsed.slug, udemy_course_id: courseId, local_course_id: localCourseId,
+        title: details.title || parsed.slug, canonical_url: canonicalUrl, hosts, endpoints, host_index: 0, endpoint_index: 0,
+        page_number: 0, lecture_count: 0, section_position: 0, lecture_position: 0, pending_section_title: "Introduction",
+        current_section_id: null, has_curriculum: false }, `Course found: ${details.title || parsed.slug}. Preparing to read curriculum.`);
+      return;
+    }
+
     const session = await getUdemySession(Number(job.user_id));
     const cookies = session?.encrypted_cookie_data ? await getCookieBundle(Number(job.user_id)) : null;
-    const domain = cookies?.businessDomain || parsed.domain;
-    const courseFields = new URLSearchParams({ "fields[course]": "id,title,headline,image_480x270,visible_instructors,url" });
-    let details: Row;
-    try { details = await readCourseApi(`https://${domain}/api-2.0/courses/${encodeURIComponent(parsed.slug)}/?${courseFields}`, cookies?.jar || {}); }
-    catch (error) {
-      if (domain === "www.udemy.com") throw error;
-      details = await readCourseApi(`https://www.udemy.com/api-2.0/courses/${encodeURIComponent(parsed.slug)}/?${courseFields}`, cookies?.jar || {});
+    let hostIndex = Number(payload.host_index || 0);
+    let endpointIndex = Number(payload.endpoint_index || 0);
+    const hosts: string[] = payload.hosts || [payload.domain, "www.udemy.com"];
+    const endpoints: string[] = payload.endpoints || ["public-curriculum-items"];
+    if (payload.stage === "write_complete") {
+      await saveStep(payload, `Imported ${Number(payload.lecture_count || 0)} lectures into ${Number(payload.section_position || 0)} sections.`, Number(payload.local_course_id), true);
+      return;
     }
-    const courseId = String(details.id);
-    const canonicalUrl = details.url?.startsWith("/") ? `https://${domain}${details.url}` : parsed.url;
-    const instructor = details.visible_instructors?.[0]?.display_name || null;
-    const curriculum: Row[] = [];
-    const hosts = [...new Set([domain, "www.udemy.com"] as string[])];
-    for (const host of hosts) {
-      for (const endpointName of [...(cookies ? ["subscriber-curriculum-items"] : []), "public-curriculum-items"]) {
-        let next: string | null = `https://${host}/api-2.0/courses/${courseId}/${endpointName}/`;
-        let first = true;
-        const params = new URLSearchParams({ page_size: "100", "fields[lecture]": "title,object_index,asset,sort_order", "fields[asset]": "title,asset_type,time_estimation,length,captions" });
-        for (let page = 0; next && page < 30; page++) {
-          const target = new URL(next);
-          if (first) for (const [key, value] of params) target.searchParams.set(key, value);
-          const response = await udemyFetch(target.toString(), cookies?.jar || {});
-          if (!response.ok) break;
-          const data = await response.json() as Row;
-          curriculum.push(...(data.results || [])); next = data.next || null; first = false;
-        }
-        if (curriculum.length) break;
+    if (hostIndex >= hosts.length || endpointIndex >= endpoints.length) {
+      if (payload.has_curriculum) {
+        await saveStep({ ...payload, stage: "write_complete" }, `Curriculum read: ${Number(payload.lecture_count || 0)} lectures found. Finishing import.`);
+      } else {
+        throw new ApiError(404, "Udemy returned no curriculum for this course.");
       }
-      if (curriculum.length) break;
+      return;
     }
-    const sections: Row[] = [];
-    let current: Row = { title: "Introduction", lectures: [] };
-    for (const item of curriculum) {
+
+    const host = hosts[hostIndex];
+    const endpoint = endpoints[endpointIndex];
+    const params = new URLSearchParams({ page_size: "25", "fields[lecture]": "title,object_index,asset,sort_order", "fields[asset]": "title,asset_type,time_estimation,length,captions" });
+    let target: URL;
+    if (payload.next_url) target = new URL(String(payload.next_url));
+    else {
+      target = new URL(`https://${host}/api-2.0/courses/${encodeURIComponent(String(payload.udemy_course_id))}/${endpoint}/`);
+      for (const [key, value] of params) target.searchParams.set(key, value);
+    }
+    await database.prepare("UPDATE processing_jobs SET progress_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+      .bind(`Reading curriculum page ${Number(payload.page_number || 0) + 1} from ${host}…`, job.id).run();
+    const response = await udemyFetch(target.toString(), cookies?.jar || {}, { signal: AbortSignal.timeout(12000) });
+    if (!response.ok) {
+      const nextEndpoint = endpointIndex + 1;
+      await saveStep({ ...payload, next_url: null, host_index: nextEndpoint < endpoints.length ? hostIndex : hostIndex + 1,
+        endpoint_index: nextEndpoint < endpoints.length ? nextEndpoint : 0 }, `Trying another Udemy curriculum endpoint for ${payload.title}.`);
+      return;
+    }
+    const data = await response.json() as Row;
+    const items: Row[] = data.results || [];
+    let nextPayload: Row = { ...payload, has_curriculum: Boolean(payload.has_curriculum) || items.length > 0,
+      page_number: Number(payload.page_number || 0) + 1, next_url: data.next || null };
+    let currentSectionId = nextPayload.current_section_id == null ? null : Number(nextPayload.current_section_id);
+    let sectionPosition = Number(nextPayload.section_position || 0);
+    let lecturePosition = Number(nextPayload.lecture_position || 0);
+    let pendingTitle = String(nextPayload.pending_section_title || "Introduction");
+    let lectureCount = Number(nextPayload.lecture_count || 0);
+    for (const item of items) {
       if (item._class === "chapter") {
-        if (current.lectures.length) sections.push(current);
-        current = { title: item.title || `Section ${sections.length + 1}`, lectures: [] };
+        pendingTitle = item.title || `Section ${sectionPosition + 1}`;
+        currentSectionId = null;
       } else if (item._class === "lecture") {
+        if (currentSectionId == null) {
+          sectionPosition++;
+          let sectionRow = await database.prepare("SELECT id FROM sections WHERE course_id=? AND position=?").bind(nextPayload.local_course_id, sectionPosition).first<Row>();
+          if (sectionRow) await database.prepare("UPDATE sections SET title=? WHERE id=?").bind(pendingTitle, sectionRow.id).run();
+          else {
+            const inserted = await database.prepare("INSERT INTO sections (course_id,title,position) VALUES (?,?,?)").bind(nextPayload.local_course_id, pendingTitle, sectionPosition).run();
+            sectionRow = { id: inserted.meta.last_row_id };
+          }
+          currentSectionId = Number(sectionRow.id);
+          lecturePosition = 0;
+        }
+        lecturePosition++;
         const asset = item.asset || {};
+        const lectureId = String(item.id);
+        const title = item.title || `Lecture ${lecturePosition}`;
         const type = String(asset.asset_type || item.asset_type || "video").toLowerCase().includes("video") ? "video" : "article";
-        current.lectures.push({ id: String(item.id), title: item.title || `Lecture ${current.lectures.length + 1}`, type,
-          duration: Number(asset.time_estimation || item.time_estimation || asset.length || 0), captions: asset.captions || asset.subtitles || [] });
-      }
-    }
-    if (current.lectures.length) sections.push(current);
-    const existing = await database.prepare("SELECT id FROM courses WHERE user_id=? AND course_id=?").bind(job.user_id, courseId).first<Row>();
-    let localCourseId: number;
-    if (existing) {
-      localCourseId = Number(existing.id);
-      await database.prepare("UPDATE courses SET title=?,url=?,instructor=?,thumbnail_url=?,last_synced_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
-        .bind(details.title || parsed.slug, canonicalUrl, instructor, details.image_480x270 || null, now(), localCourseId).run();
-    } else {
-      const inserted = await database.prepare("INSERT INTO courses (user_id,course_id,title,url,instructor,thumbnail_url,last_synced_at) VALUES (?,?,?,?,?,?,?)")
-        .bind(job.user_id, courseId, details.title || parsed.slug, canonicalUrl, instructor, details.image_480x270 || null, now()).run();
-      localCourseId = Number(inserted.meta.last_row_id);
-    }
-    for (let s = 0; s < sections.length; s++) {
-      const section = sections[s];
-      let sectionRow = await database.prepare("SELECT id FROM sections WHERE course_id=? AND position=?").bind(localCourseId, s + 1).first<Row>();
-      if (sectionRow) await database.prepare("UPDATE sections SET title=? WHERE id=?").bind(section.title, sectionRow.id).run();
-      else {
-        const inserted = await database.prepare("INSERT INTO sections (course_id,title,position) VALUES (?,?,?)").bind(localCourseId, section.title, s + 1).run();
-        sectionRow = { id: inserted.meta.last_row_id };
-      }
-      for (let l = 0; l < section.lectures.length; l++) {
-        const lecture = section.lectures[l];
+        const duration = Number(asset.time_estimation || item.time_estimation || asset.length || 0);
+        const captions = JSON.stringify(asset.captions || asset.subtitles || []);
+        const lectureUrl = `${String(nextPayload.canonical_url).replace(/\/$/, "")}/learn/lecture/${lectureId}`;
         const existingLecture = await database.prepare(`SELECT l.id FROM lectures l JOIN sections s ON s.id=l.section_id WHERE s.course_id=? AND l.lecture_id=?`)
-          .bind(localCourseId, lecture.id).first<Row>();
-        const lectureUrl = `${canonicalUrl.replace(/\/$/, "")}/learn/lecture/${lecture.id}`;
+          .bind(nextPayload.local_course_id, lectureId).first<Row>();
         if (existingLecture) await database.prepare(`UPDATE lectures SET section_id=?,title=?,url=?,lecture_type=?,duration=?,position=?,captions_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-          .bind(sectionRow.id, lecture.title, lectureUrl, lecture.type, lecture.duration, l + 1, JSON.stringify(lecture.captions), existingLecture.id).run();
+          .bind(currentSectionId, title, lectureUrl, type, duration, lecturePosition, captions, existingLecture.id).run();
         else await database.prepare(`INSERT INTO lectures (section_id,lecture_id,title,url,lecture_type,duration,position,learning_status,captions_json) VALUES (?,?,?,?,?,?,?,'NOT_STARTED',?)`)
-          .bind(sectionRow.id, lecture.id, lecture.title, lectureUrl, lecture.type, lecture.duration, l + 1, JSON.stringify(lecture.captions)).run();
+          .bind(currentSectionId, lectureId, title, lectureUrl, type, duration, lecturePosition, captions).run();
+        lectureCount++;
       }
     }
-    await database.prepare("UPDATE processing_jobs SET course_id=?,status='COMPLETED',completed_items=1,progress_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
-      .bind(localCourseId, `Course '${details.title || parsed.slug}' imported with ${sections.length} sections.`, job.id).run();
+    nextPayload = { ...nextPayload, current_section_id: currentSectionId, section_position: sectionPosition,
+      lecture_position: lecturePosition, pending_section_title: pendingTitle, lecture_count: lectureCount };
+    if (data.next) {
+      await saveStep(nextPayload, `Curriculum page ${nextPayload.page_number}: ${lectureCount} lectures imported so far.`);
+    } else if (items.length || nextPayload.has_curriculum) {
+      await saveStep({ ...nextPayload, stage: "write_complete" }, `Curriculum complete: ${lectureCount} lectures in ${sectionPosition} sections. Finishing import.`);
+    } else {
+      const nextEndpoint = endpointIndex + 1;
+      await saveStep({ ...nextPayload, next_url: null, host_index: nextEndpoint < endpoints.length ? hostIndex : hostIndex + 1,
+        endpoint_index: nextEndpoint < endpoints.length ? nextEndpoint : 0 }, `Trying another Udemy curriculum endpoint for ${payload.title}.`);
+    }
   } catch (error) {
     const detail = error instanceof Error ? error.message : "Course import failed.";
     await database.prepare("UPDATE processing_jobs SET status='FAILED',failed_items=1,error_message=?,progress_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
