@@ -28,6 +28,9 @@ function CoursesListContent() {
   const { user, loading: authLoading, refreshUser } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
+  const searchString = searchParams.toString();
+  const driveConnected = searchParams.get("drive_connected");
+  const driveError = searchParams.get("drive_error");
 
   // Courses state
   const [courses, setCourses] = useState<Course[]>([]);
@@ -54,13 +57,21 @@ function CoursesListContent() {
 
   // Handle Google Drive OAuth redirect params
   useEffect(() => {
-    if (searchParams.get("drive_connected") === "true") {
+    if (driveConnected === "true") {
       setBannerMessage("Google Drive account connected successfully! Subtitles will automatically upload to Drive.");
-      refreshUser();
-    } else if (searchParams.get("drive_error")) {
-      setBannerMessage(`Drive Connection Error: ${searchParams.get("drive_error")}`);
+      void refreshUser();
+    } else if (driveError) {
+      setBannerMessage(`Drive Connection Error: ${driveError}`);
+    } else {
+      return;
     }
-  }, [searchParams, refreshUser]);
+
+    const remainingParams = new URLSearchParams(searchString);
+    remainingParams.delete("drive_connected");
+    remainingParams.delete("drive_error");
+    const remainingQuery = remainingParams.toString();
+    router.replace(remainingQuery ? `/dashboard?${remainingQuery}` : "/dashboard", { scroll: false });
+  }, [driveConnected, driveError, refreshUser, router, searchString]);
 
   useEffect(() => {
     if (!bannerMessage) return;
