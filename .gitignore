@@ -28,7 +28,7 @@ htmlcov/
 # Node.js & Next.js
 node_modules/
 frontend/node_modules/
-sites/udemy-subtitle-manager/
+/sites/udemy-subtitle-manager/
 .next/
 out/
 /frontend/build/
@@ -48,3 +48,7 @@ Thumbs.db
 *.swo
 *.exe
 *.lnk
+
+/output/
+
+/sites/*.tar.gz

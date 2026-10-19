@@ -1,0 +1,56 @@
+import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
+import ts from "typescript";
+import { loadCourseRows } from "../app/lib/course-reader.ts";
+
+const sqlite = new DatabaseSync(":memory:");
+sqlite.exec(`CREATE TABLE sections (id INTEGER,course_id INTEGER,title TEXT,position INTEGER);
+CREATE TABLE lectures (id INTEGER,section_id INTEGER,lecture_id TEXT,title TEXT,position INTEGER,learning_status TEXT);
+CREATE TABLE subtitles (id INTEGER,lecture_id INTEGER,status TEXT);
+INSERT INTO sections VALUES (1,1,'First',1),(2,1,'Second',2),(3,2,'Other course',1);
+INSERT INTO lectures VALUES (1,1,'1','Done',1,'COMPLETED'),(2,1,'2','Next',2,'NOT_STARTED'),(3,2,'3','Current',1,'IN_PROGRESS'),(4,3,'4','Private',1,'NOT_STARTED');
+INSERT INTO subtitles VALUES (1,1,'COMPLETED'),(2,3,'FAILED'),(3,4,'COMPLETED');`);
+sqlite.exec("ALTER TABLE lectures ADD COLUMN lecture_type TEXT NOT NULL DEFAULT 'video'");
+let statements = 0, batches = 0;
+const database = {
+  prepare(sql) { return { bind(...ids) { return {sql,ids}; } }; },
+  async batch(queries) { batches++; statements += queries.length; return queries.map(({sql,ids}) => ({results:sqlite.prepare(sql).all(...ids)})); },
+};
+const source = readFileSync(new URL("../app/lib/api-worker.ts",import.meta.url),"utf8").replace(/^import .*;\r?\n/gm,"");
+const js = ts.transpileModule(source+"\nexport { courseRead };",{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
+const {courseRead} = await import("data:text/javascript;base64,"+Buffer.from(js).toString("base64"));
+const data = await loadCourseRows(database,[1]);
+const detail = await courseRead({id:1,course_id:'course-1',title:'Course'},true,data);
+assert.equal(detail.total_sections,2);
+assert.equal(detail.total_lectures,3);
+assert.equal(detail.subtitle_eligible_lectures,3);
+assert.equal(detail.next_lecture_section.id,2);
+assert.equal(detail.completed_lectures,1);
+assert.equal(detail.processed_subtitles,1);
+assert.equal(detail.failed_subtitles,1);
+assert.equal(detail.next_lecture.id,3);
+assert.equal(detail.sections[0].lectures[0].subtitles[0].id,1);
+assert.equal(data.lectures.some(row=>row.id===4),false);
+assert.equal(statements,3); assert.equal(batches,1);
+const overview = await courseRead({id:1},false,data);
+assert.equal(overview.sections,undefined);
+assert.equal(overview.total_lectures,3);
+const all = await loadCourseRows(database,[1,2]);
+assert.equal((await courseRead({id:2},true,all)).total_lectures,1);
+assert.equal((await courseRead({id:1},true,all)).total_lectures,3);
+const before = statements;
+assert.deepEqual(await loadCourseRows(database,[]),{sections:[],lectures:[],subtitles:[]});
+assert.equal(statements,before);
+for(let i=5;i<1005;i++) sqlite.prepare("INSERT INTO lectures(id,section_id,lecture_id,title,position,learning_status) VALUES (?,?,?, ?,?,?)").run(i,1,String(i),'Extra',i,'NOT_STARTED');
+statements=0; batches=0;
+const large=await loadCourseRows(database,[1]);
+assert.equal((await courseRead({id:1},true,large)).total_lectures,1003);
+assert.equal(statements,3); assert.equal(batches,1);
+sqlite.exec("INSERT INTO lectures VALUES (1005,1,'article','Article',1005,'NOT_STARTED','article'); INSERT INTO subtitles VALUES (4,1,'COMPLETED'),(5,1005,'COMPLETED')");
+const mixed = await courseRead({id:1},true,await loadCourseRows(database,[1]));
+assert.equal(mixed.total_lectures,1004);
+assert.equal(mixed.subtitle_eligible_lectures,1003);
+assert.equal(mixed.processed_subtitles,1);
+console.log("PASS: list/detail counts, next lecture priority, subtitles, course isolation, empty list, 1003 lectures in 3 SQL statements / 1 batch.");
+sqlite.close();

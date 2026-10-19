@@ -2,10 +2,11 @@
 
 import React, { useState, useEffect, useCallback, useMemo, Suspense } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import Link from "next/link";
 import { useAuth } from "../../lib/auth";
 import { api } from "../../lib/api";
 import { Course, Section, Lecture, Subtitle, ProcessingJob, LearningStatus, formatUdemyUrl } from "../../types";
+import CourseTags from "../../components/CourseTags";
+import NextLectureCard from "../../components/NextLectureCard";
 import Navbar from "../../components/Navbar";
 import ConnectionPanel from "../../components/ConnectionPanel";
 import LectureEditModal from "../../components/LectureEditModal";
@@ -97,94 +98,6 @@ function CourseContentDetail() {
     }
     return inProgress || firstNotStarted || null;
   }, [course]);
-
-  // Next lecture inline ChatGPT editing state & handlers
-  const [isEditingNextChatGpt, setIsEditingNextChatGpt] = useState(false);
-  const [nextChatGptInput, setNextChatGptInput] = useState("");
-  const [savingNextChatGpt, setSavingNextChatGpt] = useState(false);
-  const [chatGptInputError, setChatGptInputError] = useState<string | null>(null);
-
-  const handleOpenEditNextChatGpt = useCallback(() => {
-    setNextChatGptInput(nextLectureInfo?.lecture.chatgpt_url || "");
-    setChatGptInputError(null);
-    setIsEditingNextChatGpt(true);
-  }, [nextLectureInfo]);
-
-  const handleSaveNextChatGpt = useCallback(async () => {
-    if (!nextLectureInfo) return;
-    const urlClean = nextChatGptInput.trim();
-    if (urlClean) {
-      if (!urlClean.startsWith("http://") && !urlClean.startsWith("https://")) {
-        setChatGptInputError("URL must start with https://");
-        return;
-      }
-      try {
-        const parsed = new URL(urlClean);
-        if (!parsed.hostname.includes("chatgpt.com") && !parsed.hostname.includes("chat.openai.com")) {
-          setChatGptInputError("URL must point to ChatGPT (chatgpt.com or chat.openai.com)");
-          return;
-        }
-      } catch {
-        setChatGptInputError("Invalid URL format.");
-        return;
-      }
-    }
-
-    setSavingNextChatGpt(true);
-    setChatGptInputError(null);
-    try {
-      const updated = await api.courses.updateLecture(nextLectureInfo.lecture.id, {
-        chatgpt_url: urlClean || "",
-      });
-      if (course?.sections) {
-        setCourse((prev) => {
-          if (!prev) return null;
-          return {
-            ...prev,
-            sections: prev.sections?.map((sec) => ({
-              ...sec,
-              lectures: sec.lectures.map((l) => (l.id === updated.id ? updated : l)),
-            })),
-          };
-        });
-      }
-      setIsEditingNextChatGpt(false);
-      setToastMessage(urlClean ? "ChatGPT link saved successfully!" : "ChatGPT link removed.");
-    } catch (err: unknown) {
-      setChatGptInputError(err instanceof Error ? err.message : "Failed to save link.");
-    } finally {
-      setSavingNextChatGpt(false);
-    }
-  }, [nextLectureInfo, nextChatGptInput, course]);
-
-  const handleRemoveNextChatGpt = useCallback(async () => {
-    if (!nextLectureInfo) return;
-    setSavingNextChatGpt(true);
-    setChatGptInputError(null);
-    try {
-      const updated = await api.courses.updateLecture(nextLectureInfo.lecture.id, {
-        chatgpt_url: "",
-      });
-      if (course?.sections) {
-        setCourse((prev) => {
-          if (!prev) return null;
-          return {
-            ...prev,
-            sections: prev.sections?.map((sec) => ({
-              ...sec,
-              lectures: sec.lectures.map((l) => (l.id === updated.id ? updated : l)),
-            })),
-          };
-        });
-      }
-      setIsEditingNextChatGpt(false);
-      setToastMessage("ChatGPT link removed.");
-    } catch (err: unknown) {
-      setToastMessage(err instanceof Error ? err.message : "Failed to remove link.");
-    } finally {
-      setSavingNextChatGpt(false);
-    }
-  }, [nextLectureInfo, course]);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -332,7 +245,7 @@ function CourseContentDetail() {
         const sub =
           lec.subtitles.find((s) => s.language === "en" || s.language.startsWith("en")) ||
           lec.subtitles[0];
-        if (sub && sub.status === "FAILED") {
+        if (sub && (sub.status === "FAILED" || sub.drive_status === "FAILED")) {
           failedIds.push(lec.id);
         }
       });
@@ -471,13 +384,13 @@ function CourseContentDetail() {
             <p className="text-xs text-[#A3A3A3]">
               This course could not be found or may have been deleted.
             </p>
-            <Link
+            <a
               href="/dashboard"
               className="inline-flex items-center space-x-2 px-4 py-2 bg-white text-black font-semibold text-xs rounded-xl hover:bg-neutral-200 transition-colors"
             >
               <ArrowLeft className="w-4 h-4" />
               <span>Back to Courses</span>
-            </Link>
+            </a>
           </div>
         </div>
       </div>
@@ -517,13 +430,13 @@ function CourseContentDetail() {
 
         {/* Breadcrumb Navigation */}
         <div className="flex items-center space-x-3 text-xs text-[#A3A3A3]">
-          <Link
+          <a
             href="/dashboard"
             className="inline-flex items-center space-x-1.5 text-[#A3A3A3] hover:text-white transition-colors py-1.5 px-3 rounded-lg bg-[#262626] border border-[#333333] hover:border-[#4f4f4f]"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
             <span>Courses</span>
-          </Link>
+          </a>
           <span>/</span>
           <span className="text-[#ECECEC] truncate max-w-md font-medium">{course.title}</span>
         </div>
@@ -543,13 +456,15 @@ function CourseContentDetail() {
                   Udemy ID: {course.course_id}
                 </span>
                 {course.instructor && (
-                  <span className="text-xs text-[#A3A3A3]">Instructor: {course.instructor}</span>
+                  <span className="text-xs text-[#A3A3A3]">Instructor: <a href={`/api/courses/${course.id}/instructor`} target="_blank" rel="noopener noreferrer" className="hover:text-white hover:underline">{course.instructor}</a></span>
                 )}
               </div>
 
               <h1 className="text-2xl font-bold tracking-tight text-[#ECECEC] leading-snug">
-                {course.title}
+                <a href={formatUdemyUrl(course.url, user?.udemy_business_domain)} target="_blank" rel="noopener noreferrer" className="hover:underline">{course.title}</a>
               </h1>
+
+              <CourseTags courseId={course.id} tags={course.tags} onSaved={(tags) => setCourse((current) => current ? { ...current, tags } : current)} />
 
               <div className="flex flex-wrap items-center gap-4 text-xs text-[#A3A3A3] pt-1">
                 <a
@@ -568,13 +483,13 @@ function CourseContentDetail() {
 
             {/* Quick Actions */}
             <div className="flex flex-wrap items-center gap-3">
-              {course.failed_subtitles > 0 && (
+              {(course.failed_subtitles + (course.drive_sync_failed || 0)) > 0 && (
                 <button
                   onClick={handleRetryFailed}
                   className="px-3.5 py-2.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 text-xs font-semibold rounded-xl border border-rose-500/30 transition-colors flex items-center space-x-1.5 cursor-pointer shadow-sm"
                 >
                   <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
-                  <span>Retry {course.failed_subtitles} Failed</span>
+                  <span>Retry {course.failed_subtitles + (course.drive_sync_failed || 0)} Failed Stages</span>
                 </button>
               )}
 
@@ -610,7 +525,7 @@ function CourseContentDetail() {
             <div className="p-3 bg-[#1A1A1A] border border-[#333333] rounded-xl">
               <span className="text-[11px] text-[#A3A3A3] block">Processed Subtitles</span>
               <span className="text-lg font-bold text-white">
-                {course.processed_subtitles} / {course.total_lectures}
+                {course.processed_subtitles} / {course.subtitle_eligible_lectures}
               </span>
             </div>
             <div className="p-3 bg-[#1A1A1A] border border-[#333333] rounded-xl">
@@ -624,238 +539,7 @@ function CourseContentDetail() {
 
         {/* Next Lecture / Continue Learning Card */}
         {nextLectureInfo ? (
-          <div className="p-5 sm:p-6 bg-gradient-to-r from-[#262626] via-[#242424] to-[#1F1F1F] border border-amber-500/30 rounded-2xl shadow-xl relative overflow-hidden group">
-            {/* Subtle glow accent */}
-            <div className="absolute -top-16 -right-16 w-48 h-48 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
-
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5 relative z-10">
-              <div className="space-y-2.5 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm shadow-amber-500/10">
-                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                    <span>CONTINUE LEARNING</span>
-                  </span>
-                  <span className="text-xs text-[#A3A3A3] font-mono bg-[#1A1A1A] border border-[#333333] px-2.5 py-0.5 rounded-full">
-                    Section {nextLectureInfo.section.position}: {nextLectureInfo.section.title}
-                  </span>
-                  <span
-                    className={`text-[11px] font-semibold px-2.5 py-0.5 rounded-full ${
-                      nextLectureInfo.lecture.learning_status === "IN_PROGRESS"
-                        ? "bg-amber-400 text-black font-extrabold animate-pulse shadow-sm shadow-amber-400/20"
-                        : "bg-[#1A1A1A] text-[#A3A3A3] border border-[#333333]"
-                    }`}
-                  >
-                    {nextLectureInfo.lecture.learning_status === "IN_PROGRESS" ? "● In Progress" : "○ Next Up"}
-                  </span>
-                </div>
-
-                <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight leading-snug">
-                  {nextLectureInfo.lecture.position}. {nextLectureInfo.lecture.title}
-                </h2>
-
-                <div className="flex flex-wrap items-center gap-3 sm:gap-4 text-xs text-[#A3A3A3]">
-                  <span className="inline-flex items-center space-x-1 font-mono">
-                    <Clock className="w-3.5 h-3.5 text-[#A3A3A3]" />
-                    <span>{formatDuration(nextLectureInfo.lecture.duration)}</span>
-                  </span>
-                  <span>•</span>
-                  {(() => {
-                    const sub =
-                      nextLectureInfo.lecture.subtitles.find((s) => s.language === "en" || s.language.startsWith("en")) ||
-                      nextLectureInfo.lecture.subtitles[0];
-                    return (
-                      <span className="inline-flex items-center space-x-1">
-                        <FileText className="w-3.5 h-3.5 text-[#A3A3A3]" />
-                        <span>Subtitle: {sub?.status === "COMPLETED" ? `${sub.language.toUpperCase()} (Ready)` : sub?.status || "None"}</span>
-                      </span>
-                    );
-                  })()}
-                  {(() => {
-                    const sub = nextLectureInfo.lecture.subtitles.find((s) => s.drive_file_url);
-                    if (sub?.drive_file_url) {
-                      return (
-                        <>
-                          <span>•</span>
-                          <a
-                            href={sub.drive_file_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center space-x-1 text-[#ECECEC] hover:text-white hover:underline"
-                          >
-                            <HardDrive className="w-3.5 h-3.5 text-[#A3A3A3]" />
-                            <span>View in Drive</span>
-                          </a>
-                        </>
-                      );
-                    }
-                    return null;
-                  })()}
-                  {nextLectureInfo.lecture.chatgpt_url ? (
-                    <>
-                      <span>•</span>
-                      <span className="inline-flex items-center space-x-1.5 bg-sky-500/10 border border-sky-500/30 px-2.5 py-0.5 rounded-lg">
-                        <MessageSquare className="w-3.5 h-3.5 text-sky-400" />
-                        <a
-                          href={nextLectureInfo.lecture.chatgpt_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-sky-400 hover:text-sky-300 hover:underline font-medium text-xs flex items-center space-x-1"
-                        >
-                          <span>ChatGPT Summary</span>
-                          <ExternalLink className="w-3 h-3 text-sky-400/70" />
-                        </a>
-                        <button
-                          onClick={handleOpenEditNextChatGpt}
-                          className="p-1 text-[#A3A3A3] hover:text-white hover:bg-white/10 rounded transition-colors cursor-pointer"
-                          title="Edit ChatGPT link"
-                        >
-                          <Edit className="w-3 h-3" />
-                        </button>
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <span>•</span>
-                      <button
-                        onClick={handleOpenEditNextChatGpt}
-                        className="inline-flex items-center space-x-1.5 px-2.5 py-0.5 rounded-lg bg-[#1A1A1A] hover:bg-sky-500/10 text-sky-400 hover:text-sky-300 border border-sky-500/30 hover:border-sky-500/50 text-xs font-medium transition-all shadow-sm cursor-pointer"
-                        title="Add ChatGPT conversation link for this lecture"
-                      >
-                        <MessageSquare className="w-3.5 h-3.5" />
-                        <span>+ Add ChatGPT Link</span>
-                      </button>
-                    </>
-                  )}
-                </div>
-
-                {/* Inline ChatGPT Link Editor */}
-                {isEditingNextChatGpt && (
-                  <div className="pt-2 pb-1 space-y-1.5 animate-in fade-in duration-150">
-                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                      <div className="relative flex-1">
-                        <MessageSquare className="w-3.5 h-3.5 text-sky-400 absolute left-3 top-2.5" />
-                        <input
-                          type="url"
-                          autoFocus
-                          placeholder="Paste ChatGPT URL (e.g. https://chatgpt.com/c/...)"
-                          value={nextChatGptInput}
-                          onChange={(e) => {
-                            setNextChatGptInput(e.target.value);
-                            setChatGptInputError(null);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              e.preventDefault();
-                              handleSaveNextChatGpt();
-                            } else if (e.key === "Escape") {
-                              setIsEditingNextChatGpt(false);
-                            }
-                          }}
-                          className="w-full pl-9 pr-3 py-1.5 bg-[#1A1A1A] border border-sky-500/50 rounded-xl text-xs text-[#ECECEC] placeholder-[#737373] focus:outline-none focus:border-sky-400 transition-colors shadow-inner"
-                        />
-                      </div>
-
-                      <div className="flex items-center gap-1.5 flex-shrink-0">
-                        <button
-                          onClick={handleSaveNextChatGpt}
-                          disabled={savingNextChatGpt}
-                          className="px-3.5 py-1.5 bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-black text-xs font-bold rounded-xl transition-colors shadow-sm flex items-center space-x-1 cursor-pointer"
-                        >
-                          {savingNextChatGpt && <Loader2 className="w-3 h-3 animate-spin" />}
-                          <span>Save</span>
-                        </button>
-
-                        {nextLectureInfo.lecture.chatgpt_url && (
-                          <button
-                            onClick={handleRemoveNextChatGpt}
-                            disabled={savingNextChatGpt}
-                            className="px-2.5 py-1.5 bg-[#1A1A1A] hover:bg-rose-500/20 text-rose-300 border border-[#383838] hover:border-rose-500/30 text-xs rounded-xl transition-colors cursor-pointer"
-                            title="Remove link"
-                          >
-                            Remove
-                          </button>
-                        )}
-
-                        <button
-                          onClick={() => setIsEditingNextChatGpt(false)}
-                          disabled={savingNextChatGpt}
-                          className="px-2.5 py-1.5 bg-[#2E2E2E] hover:bg-[#383838] text-[#A3A3A3] hover:text-white text-xs rounded-xl border border-[#383838] transition-colors cursor-pointer"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                    {chatGptInputError && (
-                      <p className="text-[11px] text-rose-400 flex items-center space-x-1 pl-1">
-                        <AlertCircle className="w-3 h-3 flex-shrink-0" />
-                        <span>{chatGptInputError}</span>
-                      </p>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {/* Actions for Next Lecture */}
-              <div className="flex flex-wrap items-center gap-2.5">
-                {nextLectureInfo.lecture.learning_status !== "COMPLETED" && (
-                  <button
-                    onClick={() => handleUpdateLearningStatusInline(nextLectureInfo.lecture.id, "COMPLETED")}
-                    className="px-3.5 py-2.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/40 text-xs font-semibold rounded-xl transition-all shadow-sm flex items-center space-x-1.5 cursor-pointer"
-                    title="Mark lecture as completed"
-                  >
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                    <span>Mark as Done</span>
-                  </button>
-                )}
-
-                {nextLectureInfo.lecture.learning_status === "NOT_STARTED" && (
-                  <button
-                    onClick={() => handleUpdateLearningStatusInline(nextLectureInfo.lecture.id, "IN_PROGRESS")}
-                    className="px-3.5 py-2.5 bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/40 text-xs font-semibold rounded-xl transition-all shadow-sm flex items-center space-x-1.5 cursor-pointer"
-                    title="Mark lecture as in progress"
-                  >
-                    <span className="w-2 h-2 rounded-full bg-amber-400" />
-                    <span>Mark as Doing</span>
-                  </button>
-                )}
-
-                {/* ChatGPT Quick Action */}
-                {nextLectureInfo.lecture.chatgpt_url ? (
-                  <a
-                    href={nextLectureInfo.lecture.chatgpt_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="px-3.5 py-2.5 bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/40 text-xs font-semibold rounded-xl transition-all shadow-sm flex items-center space-x-1.5 cursor-pointer"
-                    title="Open ChatGPT conversation"
-                  >
-                    <MessageSquare className="w-4 h-4 text-sky-400" />
-                    <span>ChatGPT</span>
-                    <ExternalLink className="w-3 h-3 text-sky-400/80" />
-                  </a>
-                ) : (
-                  <button
-                    onClick={handleOpenEditNextChatGpt}
-                    className="px-3.5 py-2.5 bg-[#1A1A1A] hover:bg-sky-500/15 text-sky-400 hover:text-sky-300 border border-sky-500/30 hover:border-sky-500/50 text-xs font-semibold rounded-xl transition-all shadow-sm flex items-center space-x-1.5 cursor-pointer"
-                    title="Add ChatGPT conversation link"
-                  >
-                    <MessageSquare className="w-4 h-4" />
-                    <span>+ ChatGPT</span>
-                  </button>
-                )}
-
-                <a
-                  href={formatUdemyUrl(nextLectureInfo.lecture.url, user?.udemy_business_domain)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-4 py-2.5 bg-white hover:bg-neutral-200 text-black text-xs font-bold rounded-xl transition-all shadow-md flex items-center space-x-1.5 cursor-pointer"
-                >
-                  <PlayCircle className="w-4 h-4 text-black" />
-                  <span>Play on Udemy</span>
-                  <ExternalLink className="w-3.5 h-3.5 text-neutral-600" />
-                </a>
-              </div>
-            </div>
-          </div>
+          <NextLectureCard key={nextLectureInfo.lecture.id} lecture={nextLectureInfo.lecture} section={nextLectureInfo.section} businessDomain={user?.udemy_business_domain} onRefresh={() => loadCourse(true)} />
         ) : (
           course.total_lectures > 0 &&
           course.completed_lectures === course.total_lectures && (
@@ -1146,7 +830,7 @@ function CourseContentDetail() {
 
                               {/* Google Drive Link */}
                               <td className="py-3 px-4">
-                                {sub?.drive_file_url ? (
+                                {sub?.drive_status === "FAILED" ? (<button title={sub.drive_error || "Drive sync failed"} onClick={() => handleProcessSingle(lecture.id)} className="text-rose-400 text-[11px]">Retry Drive sync</button>) : sub?.drive_file_url ? (
                                   <a
                                     href={sub.drive_file_url}
                                     target="_blank"

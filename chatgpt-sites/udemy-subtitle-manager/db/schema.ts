@@ -33,6 +33,7 @@ export const courses = sqliteTable("courses", {
   title: text("title").notNull(),
   url: text("url").notNull(),
   instructor: text("instructor"),
+  tagsJson: text("tags_json").notNull().default("[]"),
   thumbnailUrl: text("thumbnail_url"),
   lastSyncedAt: timestamp("last_synced_at"),
   createdAt: timestamp("created_at"),
@@ -68,6 +69,9 @@ export const subtitles = sqliteTable("subtitles", {
   language: text("language").notNull().default("en"),
   subtitleType: text("subtitle_type").notNull().default("NONE"),
   status: text("status").notNull().default("PENDING"),
+  captionLanguage: text("caption_language"),
+  driveStatus: text("drive_status").notNull().default("NOT_REQUESTED"),
+  driveError: text("drive_error"),
   storageKey: text("storage_key"),
   driveFileId: text("drive_file_id"),
   driveFileUrl: text("drive_file_url"),
@@ -89,6 +93,8 @@ export const processingJobs = sqliteTable("processing_jobs", {
   failedItems: integer("failed_items").notNull().default(0),
   progressMessage: text("progress_message"),
   errorMessage: text("error_message"),
+  attempts: integer("attempts").notNull().default(0),
+  retryAt: integer("retry_at"),
   payloadJson: text("payload_json").notNull().default("{}"),
   createdAt: timestamp("created_at"),
   updatedAt: timestamp("updated_at"),
@@ -98,4 +104,10 @@ export const oauthStates = sqliteTable("oauth_states", {
   state: text("state").primaryKey(),
   userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   expiresAt: text("expires_at").notNull(),
+});
+
+export const jobLeases = sqliteTable("job_leases", {
+  userId: integer("user_id").primaryKey().references(() => users.id, {onDelete:"cascade"}),
+  token: text("token").notNull(),
+  expiresAt: integer("expires_at").notNull(),
 });

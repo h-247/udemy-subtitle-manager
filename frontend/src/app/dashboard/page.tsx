@@ -31,6 +31,7 @@ function CoursesListContent() {
 
   // Courses state
   const [courses, setCourses] = useState<Course[]>([]);
+  const [coursesError, setCoursesError] = useState<string | null>(null);
   const [coursesLoading, setCoursesLoading] = useState(true);
   const [courseSearch, setCourseSearch] = useState("");
 
@@ -76,11 +77,12 @@ function CoursesListContent() {
 
   const loadCourses = useCallback(async (silent = false) => {
     if (!silent) setCoursesLoading(true);
+    setCoursesError(null);
     try {
       const data = await api.courses.list();
       setCourses(data.items);
     } catch (err) {
-      console.error("Failed to load courses:", err);
+      setCoursesError(err instanceof Error ? err.message : "Failed to load courses.");
     } finally {
       if (!silent) setCoursesLoading(false);
     }
@@ -228,6 +230,11 @@ function CoursesListContent() {
         {coursesLoading ? (
           <div className="p-16 text-center text-[#A3A3A3] text-sm animate-pulse">
             Loading courses...
+          </div>
+        ) : coursesError ? (
+          <div role="alert" className="p-6 rounded-2xl border border-rose-500/30 space-y-3">
+            <p>{coursesError}</p>
+            <button onClick={() => loadCourses()} className="px-4 py-2 bg-white text-black rounded-xl">Try again</button>
           </div>
         ) : courses.length === 0 ? (
           <div className="p-16 text-center bg-[#262626] border border-[#333333] rounded-3xl space-y-4">
@@ -414,9 +421,9 @@ function CoursesListContent() {
       <CourseImportModal
         isOpen={isImportOpen}
         onClose={() => setIsImportOpen(false)}
-        onSuccess={(msg) => {
+        onSuccess={(msg, job) => {
           setToastMessage(msg);
-          loadJobs();
+          setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
           loadCourses(true);
         }}
       />

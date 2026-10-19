@@ -2,9 +2,9 @@
 
 import React from "react";
 import { useAuth } from "../lib/auth";
-import Link from "next/link";
 import {
   GraduationCap,
+  Plus,
   HardDrive,
   KeyRound,
   LogOut,
@@ -17,9 +17,10 @@ import {
 interface NavbarProps {
   onOpenConnections: () => void;
   onOpenImport?: () => void;
+  wide?: boolean;
 }
 
-export default function Navbar({ onOpenConnections, onOpenImport }: NavbarProps) {
+export default function Navbar({ onOpenConnections, onOpenImport, wide = false }: NavbarProps) {
   const { user, logout } = useAuth();
 
   const getUdemyBadge = () => {
@@ -57,9 +58,9 @@ export default function Navbar({ onOpenConnections, onOpenImport }: NavbarProps)
 
   return (
     <header className="sticky top-0 z-40 w-full border-b border-[#333333] bg-[#212121]/95 backdrop-blur-md">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div className={`${wide ? "max-w-none lg:px-10" : "max-w-7xl lg:px-8"} w-full mx-auto px-4 sm:px-6 min-h-16 py-3 flex flex-wrap gap-3 items-center justify-between`}>
         {/* Brand */}
-        <Link href="/dashboard" className="flex items-center space-x-3 group cursor-pointer">
+        <a href="/dashboard" className="flex items-center space-x-3 group cursor-pointer">
           <div className="w-10 h-10 rounded-xl bg-[#262626] border border-[#333333] flex items-center justify-center text-white shadow-sm group-hover:border-neutral-500 transition-colors">
             <GraduationCap className="w-5 h-5 text-white" />
           </div>
@@ -71,10 +72,10 @@ export default function Navbar({ onOpenConnections, onOpenImport }: NavbarProps)
               Personal Edition
             </span>
           </div>
-        </Link>
+        </a>
 
         {/* Status Pills and Actions */}
-        <div className="flex items-center space-x-2 sm:space-x-3">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           {/* Udemy Status Pill */}
           <button
             onClick={onOpenConnections}
@@ -102,6 +103,8 @@ export default function Navbar({ onOpenConnections, onOpenImport }: NavbarProps)
             </span>
             <span className="sm:hidden">Drive</span>
           </button>
+
+          {onOpenImport && <button type="button" onClick={onOpenImport} className="inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-neutral-200 text-black text-xs font-semibold rounded-xl"><Plus className="w-4 h-4" />Import Course</button>}
 
           {/* User & Logout */}
           <div className="flex items-center pl-2 sm:pl-3 border-l border-[#333333] space-x-2">

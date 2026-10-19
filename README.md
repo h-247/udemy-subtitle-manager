@@ -1,5 +1,7 @@
 # Udemy Subtitle Manager
 
+Hosted releases use the authoritative `chatgpt-sites/udemy-subtitle-manager` source. See [RELEASE.md](RELEASE.md) for tested commit provenance, deployment and unattended job processing.
+
 A production-quality, local-first full-stack web application designed for personal learning and private management of Udemy course subtitles. Built with **FastAPI (Python 3.11+, SQLAlchemy 2.0, Alembic)**, **Next.js 14 (App Router, TypeScript, Tailwind CSS)**, **PostgreSQL / SQLite**, and **Google Drive OAuth 2.0**.
 
 ---

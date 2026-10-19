@@ -6,6 +6,8 @@ import Link from "next/link";
 import { useAuth } from "../lib/auth";
 import { api } from "../lib/api";
 import { Course, ProcessingJob, formatUdemyUrl } from "../types";
+import CourseTags from "../components/CourseTags";
+import NextLectureCard from "../components/NextLectureCard";
 import Navbar from "../components/Navbar";
 import ConnectionPanel from "../components/ConnectionPanel";
 import CourseImportModal from "../components/CourseImportModal";
@@ -34,7 +36,9 @@ function CoursesListContent() {
 
   // Courses state
   const [courses, setCourses] = useState<Course[]>([]);
+  const [coursesError, setCoursesError] = useState<string | null>(null);
   const [coursesLoading, setCoursesLoading] = useState(true);
+  const [tagFilter, setTagFilter] = useState("all");
   const [courseSearch, setCourseSearch] = useState("");
 
   // Active Jobs state
@@ -87,11 +91,12 @@ function CoursesListContent() {
 
   const loadCourses = useCallback(async (silent = false) => {
     if (!silent) setCoursesLoading(true);
+    setCoursesError(null);
     try {
       const data = await api.courses.list();
       setCourses(data.items);
     } catch (err) {
-      console.error("Failed to load courses:", err);
+      setCoursesError(err instanceof Error ? err.message : "Failed to load courses.");
     } finally {
       if (!silent) setCoursesLoading(false);
     }
@@ -147,24 +152,28 @@ function CoursesListContent() {
     }
   };
 
+  const tagOptions = [...new Map(courses.flatMap((course) => course.tags.map((tag) => [tag.toLowerCase(), tag] as const))).entries()].sort((a, b) => a[1].localeCompare(b[1]));
   const filteredCourses = courses.filter((c) => {
+    if (tagFilter === "untagged" && c.tags.length) return false;
+    if (tagFilter.startsWith("tag:") && !c.tags.some((tag) => tag.toLowerCase() === tagFilter.slice(4))) return false;
     if (!courseSearch.trim()) return true;
     const q = courseSearch.toLowerCase();
     return (
       c.title.toLowerCase().includes(q) ||
-      (c.instructor && c.instructor.toLowerCase().includes(q))
+      (c.instructor && c.instructor.toLowerCase().includes(q)) || c.tags.some((tag) => tag.toLowerCase().includes(q))
     );
   });
 
   return (
     <div className="min-h-screen bg-[#212121] text-[#ECECEC] flex flex-col font-sans">
       <Navbar
+        wide
         onOpenConnections={() => setIsConnectionsOpen(true)}
         onOpenImport={() => setIsImportOpen(true)}
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+      <main aria-label="Courses dashboard" className="flex-1 w-full max-w-[1360px] mx-auto px-4 sm:px-6 lg:px-8 py-3 space-y-4">
         {/* Banner notification */}
         {bannerMessage && (
           <div className="p-4 bg-[#262626] border border-amber-500/30 rounded-2xl text-amber-300 text-sm flex items-center justify-between shadow-lg">
@@ -189,56 +198,35 @@ function CoursesListContent() {
         {/* Active background jobs bar */}
         <JobProgressBar jobs={jobs} onCancelJob={handleCancelJob} />
 
-        {/* Page Header */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-[#333333]">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight text-[#ECECEC] flex items-center space-x-3">
-              <span>My Courses</span>
-              <span className="text-xs font-mono font-medium px-2.5 py-1 bg-[#1A1A1A] text-[#A3A3A3] border border-[#333333] rounded-full">
-                {courses.length} {courses.length === 1 ? "Course" : "Courses"}
-              </span>
-            </h1>
-            <p className="text-xs text-[#A3A3A3] mt-1">
-              Manage imported Udemy courses, track lecture progress, and sync subtitles to Google Drive.
-            </p>
-          </div>
-
-          <div className="flex items-center space-x-3">
-            <button
-              onClick={() => setIsImportOpen(true)}
-              className="px-4 py-2.5 bg-white hover:bg-neutral-200 text-black text-sm font-semibold rounded-xl transition-colors flex items-center space-x-2 shadow-md cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Import Course</span>
-            </button>
-            <button
-              onClick={() => loadCourses()}
-              title="Refresh courses"
-              className="p-2.5 bg-[#2E2E2E] hover:bg-[#383838] text-[#ECECEC] border border-[#383838] rounded-xl transition-colors cursor-pointer"
-            >
-              <RefreshCw className="w-4 h-4" />
-            </button>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          {courses.length > 0 && <div className="flex flex-wrap items-center gap-2 text-xs">
+            <label htmlFor="filter-course-tags" className="text-[#A3A3A3]">Filter by tag</label>
+            <select id="filter-course-tags" value={tagFilter} onChange={(event) => setTagFilter(event.target.value)} className="px-3 py-2 rounded-full bg-[#262626] border border-[#383838]">
+              <option value="all">All tags</option>
+              <option value="untagged">Untagged</option>
+              {tagFilter.startsWith("tag:") && !tagOptions.some(([key]) => `tag:${key}` === tagFilter) && <option value={tagFilter}>{tagFilter.slice(4)}</option>}
+              {tagOptions.map(([key, tag]) => <option key={key} value={`tag:${key}`}>{tag}</option>)}
+            </select>
+            {(tagFilter !== "all" || courseSearch) && <button onClick={() => { setTagFilter("all"); setCourseSearch(""); }} className="underline text-[#A3A3A3] hover:text-white">Clear filters</button>}
+          </div>}
+          <div className="flex items-center gap-2 w-full sm:w-auto sm:ml-auto">
+            {courses.length > 0 && <div className="relative flex-1 sm:w-[360px]">
+              <Search className="w-4 h-4 text-[#A3A3A3] absolute left-3 top-2.5" />
+              <input aria-label="Search courses" type="search" placeholder="Search courses, instructors or tags..." value={courseSearch} onChange={(event) => setCourseSearch(event.target.value)} className="w-full pl-9 pr-3 py-2 bg-[#1A1A1A] border border-[#383838] rounded-xl text-xs text-[#ECECEC] placeholder-[#737373] focus:outline-none focus:border-white" />
+            </div>}
+            <button onClick={() => loadCourses()} title="Refresh courses" className="p-2 bg-[#262626] hover:bg-[#333333] border border-[#383838] rounded-xl"><RefreshCw className="w-4 h-4" /></button>
           </div>
         </div>
-
-        {/* Search input if courses exist */}
-        {courses.length > 0 && (
-          <div className="relative max-w-md">
-            <Search className="w-4 h-4 text-[#A3A3A3] absolute left-3.5 top-3" />
-            <input
-              type="text"
-              placeholder="Search courses by title or instructor..."
-              value={courseSearch}
-              onChange={(e) => setCourseSearch(e.target.value)}
-              className="w-full pl-10 pr-4 py-2.5 bg-[#1A1A1A] border border-[#333333] rounded-xl text-xs text-[#ECECEC] placeholder-[#737373] focus:outline-none focus:border-white transition-colors"
-            />
-          </div>
-        )}
 
         {/* Course Cards Grid */}
         {coursesLoading ? (
           <div className="p-16 text-center text-[#A3A3A3] text-sm animate-pulse">
             Loading courses...
+          </div>
+        ) : coursesError ? (
+          <div role="alert" className="p-6 rounded-2xl border border-rose-500/30 space-y-3">
+            <p>{coursesError}</p>
+            <button onClick={() => loadCourses()} className="px-4 py-2 bg-white text-black rounded-xl">Try again</button>
           </div>
         ) : courses.length === 0 ? (
           <div className="p-16 text-center bg-[#262626] border border-[#333333] rounded-3xl space-y-4">
@@ -259,10 +247,10 @@ function CoursesListContent() {
           </div>
         ) : filteredCourses.length === 0 ? (
           <div className="p-12 text-center text-[#A3A3A3] text-xs">
-            No courses found matching &quot;{courseSearch}&quot;.
+            No courses match the current search and tag filter.
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-x-4 gap-y-8 items-start">
             {filteredCourses.map((course) => {
               const completedPercent =
                 course.total_lectures > 0
@@ -272,13 +260,18 @@ function CoursesListContent() {
               return (
                 <div
                   key={course.id}
-                  onClick={() => router.push(`/courses/${course.id}`)}
-                  className="p-5 rounded-2xl border border-[#333333] bg-[#262626] hover:border-neutral-400 hover:shadow-xl transition-all cursor-pointer flex flex-col justify-between group"
+                  data-testid="course-card"
+                  className="min-w-0 overflow-hidden rounded-2xl border border-[#333333] bg-[#262626] hover:border-[#555555] transition-colors group"
                 >
-                  <div className="space-y-3.5">
+                  <a href={`/courses/${course.id}`} aria-label={`View ${course.title} curriculum`} className="relative block aspect-video bg-[#1A1A1A] overflow-hidden">
+                    <BookOpen className="absolute w-10 h-10 text-[#555555] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2" />
+                    {course.thumbnail_url && <img src={course.thumbnail_url} alt={course.title} width={480} height={270} loading="lazy" decoding="async" className="relative w-full h-full object-cover" onError={(event) => { event.currentTarget.style.visibility = "hidden"; }} />}
+                  </a>
+                  <div className="p-3.5">
+                  <div className="space-y-2">
                     <div className="flex items-start justify-between gap-2">
                       <h3 className="font-semibold text-sm text-[#ECECEC] group-hover:text-white line-clamp-2 leading-snug transition-colors">
-                        {course.title}
+                        <a href={formatUdemyUrl(course.url, user?.udemy_business_domain)} target="_blank" rel="noopener noreferrer" className="hover:underline">{course.title}</a>
                       </h3>
                       <a
                         href={formatUdemyUrl(course.url, user?.udemy_business_domain)}
@@ -293,16 +286,16 @@ function CoursesListContent() {
                     </div>
 
                     {course.instructor && (
-                      <p className="text-xs text-[#A3A3A3]">Instructor: {course.instructor}</p>
+                      <p className="text-xs text-[#A3A3A3]">Instructor: <a href={`/api/courses/${course.id}/instructor`} target="_blank" rel="noopener noreferrer" className="hover:text-white hover:underline">{course.instructor}</a></p>
                     )}
 
                     {/* Progress Bar */}
-                    <div className="space-y-1.5">
+                    <div className="space-y-1">
                       <div className="flex justify-between text-[11px] text-[#A3A3A3]">
                         <span>Learning Progress</span>
                         <span className="font-mono text-[#ECECEC]">{completedPercent}%</span>
                       </div>
-                      <div className="w-full bg-[#1A1A1A] h-2 rounded-full overflow-hidden border border-[#333333]/40">
+                      <div className="w-full bg-[#1A1A1A] h-1 rounded-full overflow-hidden border border-[#333333]/40">
                         <div
                           className="bg-white h-full rounded-full transition-all duration-300"
                           style={{ width: `${completedPercent}%` }}
@@ -311,18 +304,18 @@ function CoursesListContent() {
                     </div>
 
                     {/* Statistics Badges */}
-                    <div className="flex flex-wrap gap-2 text-[11px] pt-1">
-                      <span className="px-2.5 py-0.5 rounded-md bg-[#1A1A1A] text-[#A3A3A3] border border-[#333333]">
+                    <div className="flex flex-wrap gap-1.5 text-[10px]">
+                      <span className="px-2 py-0.5 rounded-md bg-[#1A1A1A] text-[#A3A3A3] border border-[#333333]">
                         {course.total_sections} Sections
                       </span>
-                      <span className="px-2.5 py-0.5 rounded-md bg-[#1A1A1A] text-[#A3A3A3] border border-[#333333]">
+                      <span className="px-2 py-0.5 rounded-md bg-[#1A1A1A] text-[#A3A3A3] border border-[#333333]">
                         {course.total_lectures} Lectures
                       </span>
-                      <span className="px-2.5 py-0.5 rounded-md bg-[#1A1A1A] text-[#ECECEC] border border-[#333333]">
-                        {course.processed_subtitles} Subtitles
+                      <span className="px-2 py-0.5 rounded-md bg-[#1A1A1A] text-[#ECECEC] border border-[#333333]">
+                        {course.processed_subtitles} / {course.subtitle_eligible_lectures} Subtitles
                       </span>
                       {course.failed_subtitles > 0 && (
-                        <span className="px-2.5 py-0.5 rounded-md bg-rose-500/10 text-rose-400 border border-rose-500/20">
+                        <span className="px-2 py-0.5 rounded-md bg-rose-500/10 text-rose-400 border border-rose-500/20">
                           {course.failed_subtitles} Failed
                         </span>
                       )}
@@ -330,40 +323,7 @@ function CoursesListContent() {
 
                     {/* Next Lecture Preview */}
                     {course.next_lecture ? (
-                      <div
-                        className="mt-3 p-2.5 bg-[#1A1A1A] border border-[#333333] hover:border-amber-500/40 rounded-xl space-y-1.5 transition-colors"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <div className="flex items-center justify-between text-[11px]">
-                          <span className="flex items-center space-x-1.5 font-bold text-amber-300">
-                            <Sparkles className="w-3 h-3 text-amber-400" />
-                            <span>Next Lecture</span>
-                          </span>
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
-                              course.next_lecture.learning_status === "IN_PROGRESS"
-                                ? "bg-amber-400 text-black animate-pulse"
-                                : "bg-[#262626] text-[#A3A3A3] border border-[#383838]"
-                            }`}
-                          >
-                            {course.next_lecture.learning_status === "IN_PROGRESS" ? "Doing" : "To do"}
-                          </span>
-                        </div>
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-xs text-[#ECECEC] font-medium truncate">
-                            {course.next_lecture.position}. {course.next_lecture.title}
-                          </span>
-                          <a
-                            href={formatUdemyUrl(course.next_lecture.url, user?.udemy_business_domain)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            title="Play lecture on Udemy"
-                            className="p-1 rounded-lg bg-[#262626] hover:bg-white text-[#A3A3A3] hover:text-black transition-colors flex-shrink-0"
-                          >
-                            <PlayCircle className="w-3.5 h-3.5" />
-                          </a>
-                        </div>
-                      </div>
+                      <NextLectureCard key={course.next_lecture.id} lecture={course.next_lecture} section={course.next_lecture_section} businessDomain={user?.udemy_business_domain} onRefresh={() => loadCourses(true)} compact />
                     ) : (
                       course.total_lectures > 0 &&
                       course.completed_lectures === course.total_lectures && (
@@ -375,8 +335,11 @@ function CoursesListContent() {
                     )}
                   </div>
 
+                  <div className="mt-2">
+                    <CourseTags courseId={course.id} tags={course.tags} onSelect={(tag) => setTagFilter(`tag:${tag.toLowerCase()}`)} onSaved={(tags) => setCourses((current) => current.map((item) => item.id === course.id ? { ...item, tags } : item))} />
+                  </div>
                   {/* Bottom Footer & CTA */}
-                  <div className="pt-4 mt-4 border-t border-[#333333] space-y-3">
+                  <div className="pt-2 mt-2 border-t border-[#333333] space-y-1">
                     <div className="flex items-center justify-between text-xs">
                       <span className="text-[10px] text-[#A3A3A3] font-mono">
                         Synced: {new Date(course.last_synced_at).toLocaleDateString()}
@@ -403,10 +366,11 @@ function CoursesListContent() {
                     </div>
 
                     {/* View Course Content Button */}
-                    <div className="w-full py-2 px-3 bg-[#1A1A1A] group-hover:bg-white group-hover:text-black text-[#ECECEC] border border-[#333333] group-hover:border-white rounded-xl text-xs font-semibold flex items-center justify-between transition-all">
+                    <a href={`/courses/${course.id}`} className="w-full py-1.5 text-[#ECECEC] hover:text-white text-xs font-medium flex items-center justify-between">
                       <span>View Course Content</span>
                       <ArrowRight className="w-3.5 h-3.5" />
-                    </div>
+                    </a>
+                  </div>
                   </div>
                 </div>
               );

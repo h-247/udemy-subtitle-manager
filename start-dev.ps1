@@ -13,7 +13,7 @@ if (-not (Test-Path "backend\.env")) {
     Copy-Item .env.example backend\.env
 }
 if (-not (Test-Path "frontend\.env.local")) {
-    Set-Content -Path "frontend\.env.local" -Value "NEXT_PUBLIC_API_URL=http://localhost:8000/api"
+    Set-Content -Path "frontend\.env.local" -Value "NEXT_PUBLIC_API_URL=http://127.0.0.1:8000/api"
 }
 
 # 2. Run database migrations

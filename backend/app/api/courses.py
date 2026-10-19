@@ -3,7 +3,7 @@ import logging
 from urllib.parse import urlparse
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import func
 
 from app.database import get_db
@@ -26,15 +26,8 @@ router = APIRouter(prefix="/courses", tags=["courses"])
 
 
 def _calculate_course_stats(course: Course, db: Session) -> dict:
-    total_sections = db.query(func.count(Section.id)).filter(Section.course_id == course.id).scalar() or 0
-
-    lectures = (
-        db.query(Lecture)
-        .join(Section)
-        .filter(Section.course_id == course.id)
-        .order_by(Section.position.asc(), Lecture.position.asc())
-        .all()
-    )
+    total_sections = len(course.sections)
+    lectures = [lecture for section in course.sections for lecture in section.lectures]
     total_lectures = len(lectures)
     completed_lectures = sum(1 for l in lectures if l.learning_status == "COMPLETED")
 
@@ -51,20 +44,9 @@ def _calculate_course_stats(course: Course, db: Session) -> dict:
                 next_lecture = l
                 break
 
-    lecture_ids = [l.id for l in lectures]
-    processed_subtitles = 0
-    failed_subtitles = 0
-    if lecture_ids:
-        processed_subtitles = (
-            db.query(func.count(Subtitle.id))
-            .filter(Subtitle.lecture_id.in_(lecture_ids), Subtitle.status == "COMPLETED")
-            .scalar() or 0
-        )
-        failed_subtitles = (
-            db.query(func.count(Subtitle.id))
-            .filter(Subtitle.lecture_id.in_(lecture_ids), Subtitle.status == "FAILED")
-            .scalar() or 0
-        )
+    subtitles = [subtitle for lecture in lectures for subtitle in lecture.subtitles]
+    processed_subtitles = sum(subtitle.status == "COMPLETED" for subtitle in subtitles)
+    failed_subtitles = sum(subtitle.status == "FAILED" for subtitle in subtitles)
 
     return {
         "total_sections": total_sections,
@@ -149,7 +131,8 @@ def list_courses(
 
     total = query.count()
     courses = (
-        query.order_by(Course.created_at.desc())
+        query.options(selectinload(Course.sections).selectinload(Section.lectures).selectinload(Lecture.subtitles))
+        .order_by(Course.created_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
@@ -169,6 +152,7 @@ def get_course(
     course = (
         db.query(Course)
         .filter(Course.id == course_id, Course.user_id == current_user.id)
+        .options(selectinload(Course.sections).selectinload(Section.lectures).selectinload(Lecture.subtitles))
         .first()
     )
     if not course:

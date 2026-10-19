@@ -24,13 +24,14 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   const response = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
     credentials: "same-origin",
+    signal: options.signal ?? AbortSignal.timeout(20000),
     headers,
   });
 
   if (!response.ok) {
     let errorDetail = "An unexpected error occurred.";
     try {
-      const errorJson = await response.json();
+      const errorJson = await response.json() as { detail?: string | { msg?: string; loc?: unknown[] }[] | Record<string, unknown> };
       if (Array.isArray(errorJson.detail)) {
         errorDetail = errorJson.detail
           .map((item: { msg?: string; loc?: unknown[] }) => {
@@ -145,6 +146,13 @@ export const api = {
       return request<Course>(`/courses/${courseId}`);
     },
 
+    async updateTags(courseId: number, tags: string[]): Promise<{ tags: string[] }> {
+      return request<{ tags: string[] }>(`/courses/${courseId}/tags`, {
+        method: "PATCH",
+        body: JSON.stringify({ tags }),
+      });
+    },
+
     async sync(courseId: number): Promise<ProcessingJob> {
       return request<ProcessingJob>(`/courses/${courseId}/sync`, {
         method: "POST",
@@ -215,6 +223,7 @@ export const api = {
   },
 
   jobs: {
+    async retry(jobId: number): Promise<ProcessingJob> { return request<ProcessingJob>(`/jobs/${jobId}/retry`, {method: "POST"}); },
     async list(courseId?: number): Promise<ProcessingJob[]> {
       const q = courseId ? `?course_id=${courseId}` : "";
       return request<ProcessingJob[]>(`/jobs${q}`);

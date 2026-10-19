@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import vinext from "vinext";
 import { defineConfig } from "vite";
 import hostingConfig from "./.openai/hosting.json";
@@ -51,7 +53,10 @@ export default defineConfig(async ({ command }) => {
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
+  const provenance = new URL("./.openai/release.json", import.meta.url);
+  const releaseCommit = existsSync(provenance) ? JSON.parse(readFileSync(provenance,"utf8")).commit : execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim();
   return {
+    define: { __RELEASE_COMMIT__: JSON.stringify(releaseCommit) },
     server: {
       ...(managedLinux
         ? { host: "0.0.0.0", allowedHosts: ["terminal.local"] }

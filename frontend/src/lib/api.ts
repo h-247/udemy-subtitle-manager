@@ -9,7 +9,7 @@ import {
   UdemyStatusResponse,
 } from "../types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8050/api";
 
 function getAuthHeader(): Record<string, string> {
   if (typeof window === "undefined") return {};
@@ -28,10 +28,23 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     headers["Content-Type"] = "application/json";
   }
 
-  const response = await fetch(`${API_BASE}${endpoint}`, {
-    ...options,
-    headers,
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${endpoint}`, {
+      ...options,
+      headers,
+      signal: options.signal || controller.signal,
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error("The server took too long to respond. Please try again.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     let errorDetail = "An unexpected error occurred.";

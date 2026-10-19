@@ -52,7 +52,7 @@ class JobService:
                 user_id=user_id,
                 job_type="COURSE_IMPORT",
                 status="PROCESSING",
-                total_items=1,
+                total_items=3,
                 completed_items=0,
                 failed_items=0,
                 progress_message="Starting course import...",
@@ -109,11 +109,17 @@ class JobService:
             details = udemy_service.fetch_course_details(slug, cookies_dict, domain=course_domain)
             course_udemy_id = details["course_id"]
 
+            job.completed_items = 1
             job.progress_message = "Retrieving curriculum items (sections & lectures)..."
             db.commit()
 
             curriculum_items = udemy_service.fetch_curriculum_items(course_udemy_id, cookies_dict, domain=course_domain)
             parsed_sections = udemy_service.parse_curriculum(curriculum_items, normalized_url)
+
+            job.total_items = 3 + len(parsed_sections)
+            job.completed_items = 2
+            job.progress_message = f"Saving {len(parsed_sections)} sections and their lectures..."
+            db.commit()
 
             # Check if course exists for user
             existing_course = (
@@ -141,6 +147,9 @@ class JobService:
 
                 # Update or add sections
                 for sec_idx, sec_data in enumerate(parsed_sections, 1):
+                    job.completed_items = 2 + sec_idx - 1
+                    job.progress_message = f"Saving section {sec_idx}/{len(parsed_sections)}: {sec_data['title']}"
+                    db.commit()
                     sec = (
                         db.query(Section)
                         .filter(Section.course_id == course.id, Section.position == sec_idx)
@@ -199,6 +208,9 @@ class JobService:
                 db.refresh(course)
 
                 for sec_idx, sec_data in enumerate(parsed_sections, 1):
+                    job.completed_items = 2 + sec_idx - 1
+                    job.progress_message = f"Saving section {sec_idx}/{len(parsed_sections)}: {sec_data['title']}"
+                    db.commit()
                     sec = Section(
                         course_id=course.id,
                         title=sec_data["title"],
@@ -224,7 +236,7 @@ class JobService:
 
             job.course_id = course.id
             job.status = "COMPLETED"
-            job.completed_items = 1
+            job.completed_items = job.total_items
             job.progress_message = f"Course '{course.title}' imported successfully with {len(parsed_sections)} sections."
             db.commit()
 

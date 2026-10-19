@@ -35,6 +35,10 @@ export interface Subtitle {
   lecture_id: number;
   language: string;
   subtitle_type: SubtitleType;
+  download_status: SubtitleStatus;
+  caption_language: string;
+  drive_status: "NOT_REQUESTED" | "PENDING" | "COMPLETED" | "FAILED";
+  drive_error: string | null;
   status: SubtitleStatus;
   drive_file_id?: string | null;
   drive_file_url?: string | null;
@@ -71,13 +75,17 @@ export interface Course {
   title: string;
   url: string;
   instructor?: string | null;
+  tags: string[];
   thumbnail_url?: string | null;
   total_sections: number;
   total_lectures: number;
   completed_lectures: number;
   processed_subtitles: number;
+  subtitle_eligible_lectures: number;
   failed_subtitles: number;
+  drive_sync_failed: number;
   next_lecture?: Lecture | null;
+  next_lecture_section?: Pick<Section, "id" | "title" | "position"> | null;
   last_synced_at: string;
   created_at: string;
   sections?: Section[];

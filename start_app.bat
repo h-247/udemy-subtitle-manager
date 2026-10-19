@@ -17,7 +17,7 @@ if not exist "backend\.env" (
     copy /y .env.example backend\.env >nul
 )
 if not exist "frontend\.env.local" (
-    echo NEXT_PUBLIC_API_URL=http://localhost:8050/api > frontend\.env.local
+    echo NEXT_PUBLIC_API_URL=http://127.0.0.1:8050/api > frontend\.env.local
 )
 
 :: 2. Launch Backend (FastAPI on http://127.0.0.1:8050)

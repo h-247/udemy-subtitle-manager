@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import { api } from "../lib/api";
 import { ProcessingJob } from "../types";
 import { Loader2, XCircle, CheckCircle2, AlertCircle } from "lucide-react";
 
@@ -10,7 +11,7 @@ interface JobProgressBarProps {
 }
 
 export default function JobProgressBar({ jobs, onCancelJob }: JobProgressBarProps) {
-  const activeJobs = jobs.filter((j) => j.status === "PROCESSING" || j.status === "PENDING");
+  const activeJobs = jobs.filter((j) => j.status === "PROCESSING" || j.status === "PENDING" || j.status === "FAILED");
   if (activeJobs.length === 0) return null;
 
   return (
@@ -35,17 +36,17 @@ export default function JobProgressBar({ jobs, onCancelJob }: JobProgressBarProp
                 </span>
               </div>
               <button
-                onClick={() => onCancelJob(job.id)}
+                onClick={async () => { if (job.status === "FAILED") { await api.jobs.retry(job.id); window.location.reload(); } else onCancelJob(job.id); }}
                 className="text-xs font-medium text-[#A3A3A3] hover:text-rose-400 flex items-center space-x-1 px-2.5 py-1 rounded-lg hover:bg-rose-500/10 transition-colors"
               >
                 <XCircle className="w-3.5 h-3.5" />
-                <span>Cancel</span>
+                <span>{job.status === "FAILED" ? "Retry job" : "Cancel"}</span>
               </button>
             </div>
 
             {/* Progress message */}
             <p className="text-xs text-[#A3A3A3] mb-2 truncate">
-              {job.progress_message || "Working in background..."}
+              {job.error_message || job.progress_message || "Queued for background processing (up to 5 minutes)."}
             </p>
 
             {/* Progress bar */}

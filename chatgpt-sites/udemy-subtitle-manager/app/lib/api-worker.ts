@@ -1,8 +1,11 @@
+import { releaseCommit } from "./release";
+import { saveCourseTags } from "./course-tags";
+import { loadCourseRows } from "./course-reader";
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../chatgpt-auth";
 
 type Row = Record<string, any>;
-type UserRow = { id: number; email: string; platform_user_id: string; is_active: number; drive_credentials: string | null };
+type UserRow = { created_at?: string; id: number; email: string; platform_user_id: string; is_active: number; drive_credentials: string | null };
 type CookieBundle = { text: string; jar: Record<string, string>; businessDomain: string | null };
 type Caption = Record<string, any>;
 
@@ -178,7 +181,7 @@ async function udemyFetch(url: string, jar: Record<string, string> = {}, init: R
     headers.set("Cookie", cookieHeader(jar));
     if (jar.access_token) headers.set("Authorization", `Bearer ${jar.access_token}`);
   }
-  const response = await fetch(url, { ...init, headers, redirect: "follow" });
+  const response = await fetch(url, { ...init, signal: init.signal || AbortSignal.timeout(12000), headers, redirect: "follow" });
   return response;
 }
 
@@ -336,7 +339,7 @@ async function driveCallback(request: Request, url: URL) {
   const config = driveConfig(url.toString());
   if (!config.clientId || !config.clientSecret) return Response.redirect(new URL(`/dashboard?drive_error=${encodeURIComponent("Google Drive OAuth is not configured on this Site.")}`, url.origin), 302);
   const form = new URLSearchParams({ code, client_id: config.clientId, client_secret: config.clientSecret, redirect_uri: config.redirectUri, grant_type: "authorization_code" });
-  const response = await fetch("https://oauth2.googleapis.com/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form });
+  const response = await fetch("https://oauth2.googleapis.com/token", { method: "POST", signal: AbortSignal.timeout(12000), headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form });
   const token = await response.json() as Row;
   if (!response.ok || !token.access_token) return Response.redirect(new URL(`/dashboard?drive_error=${encodeURIComponent("Google Drive token exchange failed. Check the OAuth redirect URI.")}`, url.origin), 302);
   const user = await database.prepare("SELECT * FROM users WHERE id=?").bind(savedState.user_id).first<UserRow>();
@@ -362,7 +365,8 @@ async function courseRoutes(request: Request, user: UserRow, path: string[], url
     const bind = search ? [user.id, term] : [user.id];
     const total = await database.prepare(search ? "SELECT COUNT(*) AS total FROM courses WHERE user_id=? AND title LIKE ? ESCAPE '\\'" : "SELECT COUNT(*) AS total FROM courses WHERE user_id=?").bind(...bind).first<Row>();
     const rows = await database.prepare(`${query} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`).bind(...bind, pageSize, (page - 1) * pageSize).all<Row>();
-    const items = await Promise.all(rows.results.map((course) => courseRead(course, false)));
+    const data = await loadCourseRows(database, rows.results.map((course) => course.id));
+    const items = await Promise.all(rows.results.map((course) => courseRead(course, false, data)));
     return json({ items, total: Number(total?.total || 0) });
   }
   if (path[0] === "lectures" && path.length === 2 && request.method === "PATCH") {
@@ -391,9 +395,40 @@ async function courseRoutes(request: Request, user: UserRow, path: string[], url
   }
   const id = Number(path[0]);
   if (!Number.isInteger(id) || id <= 0) return fail("Not found.", 404);
+  if (path.length === 2 && path[1] === "tags" && request.method === "PATCH") {
+    const payload = await bodyJson(request);
+    let tags: string[] | null;
+    try { tags = await saveCourseTags(database, user.id, id, payload.tags); }
+    catch (error) {
+      if (error instanceof TypeError) throw new ApiError(400, error.message);
+      throw error;
+    }
+    if (!tags) throw new ApiError(404, "Course not found.");
+    return json({ tags });
+  }
   if (path.length === 2 && path[1] === "sync" && request.method === "POST") {
     const course = await ownedCourse(user.id, id);
     return json(await ensureJob(user.id, "COURSE_IMPORT", id, { url: course.url }, 1), 202);
+  }
+  if (path.length === 2 && path[1] === "instructor" && request.method === "GET") {
+    const course = await ownedCourse(user.id, id);
+    const fallback = new URL(course.url);
+    fallback.hash = "instructor-1";
+    try {
+      const cookies = await getCookieBundle(user.id).catch(() => null);
+      const courseUrl = new URL(course.url);
+      const fields = new URLSearchParams({ "fields[course]": "visible_instructors", "fields[user]": "url,display_name" });
+      const response = await udemyFetch(`https://${courseUrl.hostname}/api-2.0/courses/${encodeURIComponent(course.course_id)}/?${fields}`, cookies?.jar ?? {}, { signal: AbortSignal.timeout(8000) });
+      if (response.ok) {
+        const details = await response.json() as Row;
+        const profile = details.visible_instructors?.[0]?.url;
+        if (profile) {
+          const target = new URL(profile, "https://www.udemy.com");
+          if (target.protocol === "https:" && (target.hostname === "udemy.com" || target.hostname.endsWith(".udemy.com"))) return Response.redirect(target.toString(), 302);
+        }
+      }
+    } catch { /* The course's instructor section remains a valid Udemy destination. */ }
+    return Response.redirect(fallback.toString(), 302);
   }
   if (path.length === 1 && request.method === "GET") return json(await courseRead(await ownedCourse(user.id, id), true));
   if (path.length === 1 && request.method === "DELETE") {
@@ -457,10 +492,10 @@ async function subtitleRoutes(request: Request, user: UserRow, path: string[], _
     if (credentials) {
       try {
         const upload = await driveUpload(user, credentials, `${String(lecture.position).padStart(3, "0")} - ${lecture.title}.vtt`, content,
-          [driveConfig().folderName, safeDriveName(lecture.course_title), `Section ${String(lecture.section_position).padStart(2, "0")} - ${safeDriveName(lecture.section_title)}`]);
-        await database.prepare("UPDATE subtitles SET drive_file_id=?,drive_file_url=? WHERE id=?").bind(upload.id, upload.url, subtitle!.id).run();
+          [driveConfig().folderName, safeDriveName(lecture.course_title), `Section ${String(lecture.section_position).padStart(2, "0")} - ${safeDriveName(lecture.section_title)}`], subtitle!.id);
+        await database.prepare("UPDATE subtitles SET drive_file_id=?,drive_file_url=?,drive_status='COMPLETED',drive_error=NULL WHERE id=?").bind(upload.id, upload.url, subtitle!.id).run();
       } catch (error) {
-        await database.prepare("UPDATE subtitles SET error_message=?,error_category='DRIVE_ERROR' WHERE id=?").bind(`Saved to Site storage. Drive upload failed: ${error instanceof Error ? error.message : "unknown error"}`, subtitle!.id).run();
+        await database.prepare("UPDATE subtitles SET drive_error=?,drive_status='FAILED' WHERE id=?").bind(`Saved to Site storage. Drive upload failed: ${error instanceof Error ? error.message : "unknown error"}`, subtitle!.id).run();
         message = "Subtitle saved to Site storage, but Google Drive upload failed.";
       }
     }
@@ -502,7 +537,7 @@ async function subtitleRoutes(request: Request, user: UserRow, path: string[], _
 async function jobRoutes(request: Request, user: UserRow, path: string[], url: URL) {
   const database = db();
   if (!path.length && request.method === "GET") {
-    await processPendingJob(user.id);
+    // Job reads are side-effect free; the unattended dispatcher advances work.
     const courseId = Number(url.searchParams.get("course_id") || 0);
     const limit = safeInt(url.searchParams.get("limit"), 10, 1, 50);
     const rows = courseId
@@ -515,9 +550,13 @@ async function jobRoutes(request: Request, user: UserRow, path: string[], url: U
   let job = await database.prepare("SELECT * FROM processing_jobs WHERE id=? AND user_id=?").bind(id, user.id).first<Row>();
   if (!job) throw new ApiError(404, "Job not found.");
   if (path.length === 1 && request.method === "GET") {
-    await processPendingJob(user.id);
+    // Job reads are side-effect free; the unattended dispatcher advances work.
     job = await database.prepare("SELECT * FROM processing_jobs WHERE id=? AND user_id=?").bind(id, user.id).first<Row>();
     return json(jobRead(job!));
+  }
+  if (path.length === 2 && path[1] === "retry" && request.method === "POST") {
+    await database.prepare("UPDATE processing_jobs SET status='PENDING',attempts=0,retry_at=NULL,error_message=NULL WHERE id=? AND status IN ('FAILED','CANCELLED')").bind(id).run();
+    return json(jobRead((await database.prepare("SELECT * FROM processing_jobs WHERE id=?").bind(id).first<Row>())!));
   }
   if (path.length === 2 && path[1] === "cancel" && request.method === "POST") {
     if (!["COMPLETED", "FAILED", "CANCELLED"].includes(job.status)) {
@@ -551,7 +590,7 @@ function jobRead(row: Row) {
 function subtitleRead(row: Row) {
   return {
     id: Number(row.id), lecture_id: Number(row.lecture_id), language: row.language,
-    subtitle_type: row.subtitle_type, status: row.status, drive_file_id: row.drive_file_id ?? null,
+    subtitle_type: row.subtitle_type, status: row.status, download_status: row.status, drive_status: row.drive_status ?? "NOT_REQUESTED", drive_error: row.drive_error ?? null, caption_language: row.caption_language ?? row.language, drive_file_id: row.drive_file_id ?? null,
     drive_file_url: row.drive_file_url ?? null, error_message: row.error_message ?? null,
     error_category: row.error_category ?? null, last_processed_at: row.last_processed_at ?? null,
   };
@@ -566,42 +605,42 @@ function lectureRead(row: Row, subtitleRows: Row[] = []) {
   };
 }
 
-async function courseRead(course: Row, includeSections = false) {
-  const database = db();
-  const sectionsRows = await database.prepare("SELECT * FROM sections WHERE course_id=? ORDER BY position,id").bind(course.id).all<Row>();
-  const sectionsData = [];
-  let totalLectures = 0, completedLectures = 0, processedSubtitles = 0, failedSubtitles = 0;
-  const orderedLectures: Row[] = [];
-  for (const section of sectionsRows.results) {
-    const lecturesRows = await database.prepare("SELECT * FROM lectures WHERE section_id=? ORDER BY position,id").bind(section.id).all<Row>();
-    totalLectures += lecturesRows.results.length;
-    for (const lecture of lecturesRows.results) {
-      orderedLectures.push(lecture);
-      if (lecture.learning_status === "COMPLETED") completedLectures++;
-      const subs = await database.prepare("SELECT * FROM subtitles WHERE lecture_id=?").bind(lecture.id).all<Row>();
-      processedSubtitles += subs.results.filter((sub) => sub.status === "COMPLETED").length;
-      failedSubtitles += subs.results.filter((sub) => sub.status === "FAILED").length;
-      if (includeSections) (lecture as any).__subtitles = subs.results;
-    }
-    sectionsData.push({
-      id: Number(section.id), course_id: Number(section.course_id), title: section.title,
-      position: Number(section.position),
-      ...(includeSections ? { lectures: lecturesRows.results.map((lec) => lectureRead(lec, (lec as any).__subtitles ?? [])) } : {}),
-    });
+async function courseRead(course: Row, includeSections = false, data?: { sections: Row[]; lectures: Row[]; subtitles: Row[] }) {
+  const rows = data ?? await loadCourseRows(db(), [course.id]);
+  const sections = rows.sections.filter((section) => Number(section.course_id) === Number(course.id));
+  const lecturesBySection = new Map<number, Row[]>();
+  const subtitlesByLecture = new Map<number, Row[]>();
+  for (const lecture of rows.lectures) {
+    const id = Number(lecture.section_id);
+    const group = lecturesBySection.get(id) ?? [];
+    group.push(lecture); lecturesBySection.set(id, group);
   }
+  for (const subtitle of rows.subtitles) {
+    const id = Number(subtitle.lecture_id);
+    const group = subtitlesByLecture.get(id) ?? [];
+    group.push(subtitle); subtitlesByLecture.set(id, group);
+  }
+  const orderedLectures = sections.flatMap((section) => lecturesBySection.get(Number(section.id)) ?? []);
+  const subtitles = orderedLectures.flatMap((lecture) => subtitlesByLecture.get(Number(lecture.id)) ?? []);
   const nextLecture = orderedLectures.find((lecture) => lecture.learning_status === "IN_PROGRESS")
     ?? orderedLectures.find((lecture) => lecture.learning_status === "NOT_STARTED");
-  const nextSubtitles = nextLecture
-    ? await database.prepare("SELECT * FROM subtitles WHERE lecture_id=?").bind(nextLecture.id).all<Row>()
-    : { results: [] as Row[] };
   return {
     id: Number(course.id), course_id: String(course.course_id), title: course.title, url: course.url,
+    tags: JSON.parse(course.tags_json || "[]") as string[],
     instructor: course.instructor ?? null, thumbnail_url: course.thumbnail_url ?? null,
-    total_sections: sectionsRows.results.length, total_lectures: totalLectures,
-    completed_lectures: completedLectures, processed_subtitles: processedSubtitles,
-    failed_subtitles: failedSubtitles, next_lecture: nextLecture ? lectureRead(nextLecture, nextSubtitles.results) : null,
+    total_sections: sections.length, total_lectures: orderedLectures.length,
+    completed_lectures: orderedLectures.filter((lecture) => lecture.learning_status === "COMPLETED").length,
+    subtitle_eligible_lectures: orderedLectures.filter((lecture) => lecture.lecture_type === "video").length,
+    processed_subtitles: orderedLectures.filter((lecture) => lecture.lecture_type === "video" && subtitlesByLecture.get(Number(lecture.id))?.some((subtitle) => subtitle.status === "COMPLETED")).length,
+    failed_subtitles: orderedLectures.filter((lecture) => lecture.lecture_type === "video" && subtitlesByLecture.get(Number(lecture.id))?.some((subtitle) => subtitle.status === "FAILED") && !subtitlesByLecture.get(Number(lecture.id))?.some((subtitle) => subtitle.status === "COMPLETED")).length,
+    drive_sync_failed: subtitles.filter((subtitle) => subtitle.drive_status === "FAILED").length,
+    next_lecture: nextLecture ? lectureRead(nextLecture, subtitlesByLecture.get(Number(nextLecture.id))) : null,
+    next_lecture_section: nextLecture ? sections.find((section) => Number(section.id) === Number(nextLecture.section_id)) ?? null : null,
     last_synced_at: course.last_synced_at, created_at: course.created_at,
-    ...(includeSections ? { sections: sectionsData } : {}),
+    ...(includeSections ? { sections: sections.map((section) => ({
+      id: Number(section.id), course_id: Number(section.course_id), title: section.title, position: Number(section.position),
+      lectures: (lecturesBySection.get(Number(section.id)) ?? []).map((lecture) => lectureRead(lecture, subtitlesByLecture.get(Number(lecture.id)))),
+    })) } : {}),
   };
 }
 
@@ -640,7 +679,7 @@ async function driveAccessToken(user: UserRow, credentials: Row) {
   if (credentials.access_token && Number(credentials.expires_at || 0) > Date.now() + 60_000) return credentials.access_token as string;
   if (!credentials.refresh_token || !config.clientId || !config.clientSecret) throw new ApiError(401, "Google Drive authorization expired. Reconnect Drive.");
   const body = new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret, refresh_token: credentials.refresh_token, grant_type: "refresh_token" });
-  const response = await fetch("https://oauth2.googleapis.com/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+  const response = await fetch("https://oauth2.googleapis.com/token", { method: "POST", signal: AbortSignal.timeout(12000), headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
   const data = await response.json() as Row;
   if (!response.ok || !data.access_token) throw new ApiError(401, "Google Drive token refresh failed. Reconnect Drive.");
   const next = { ...credentials, access_token: data.access_token, expires_at: Date.now() + Number(data.expires_in || 3600) * 1000 };
@@ -653,7 +692,7 @@ async function driveAccessToken(user: UserRow, credentials: Row) {
 async function driveRequest(user: UserRow, credentials: Row, url: string, init: RequestInit = {}) {
   const token = await driveAccessToken(user, credentials);
   const headers = new Headers(init.headers); headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(url, { ...init, headers });
+  const response = await fetch(url, { ...init, signal: AbortSignal.timeout(12000), headers });
   if (!response.ok) throw new ApiError(response.status, `Google Drive returned HTTP ${response.status}.`);
   return response;
 }
@@ -682,9 +721,24 @@ async function driveFolder(user: UserRow, credentials: Row, hierarchy: string[])
   return parent;
 }
 
-async function driveUpload(user: UserRow, credentials: Row, name: string, content: string, hierarchy: string[]) {
+async function driveUpload(user: UserRow, credentials: Row, name: string, content: string, hierarchy: string[], subtitleId?: number) {
   const parent = await driveFolder(user, credentials, hierarchy);
-  const metadata = { name: safeDriveName(name), ...(parent ? { parents: [parent] } : {}) };
+  let reservedId: string | undefined;
+  if (subtitleId) {
+    const saved = await db().prepare("SELECT drive_file_id FROM subtitles WHERE id=?").bind(subtitleId).first<Row>();
+    reservedId = saved?.drive_file_id || undefined;
+    if (!reservedId) {
+      const generated = await driveRequest(user, credentials, "https://www.googleapis.com/drive/v3/files/generateIds?count=1&space=drive&type=files");
+      reservedId = ((await generated.json()) as Row).ids[0];
+      await db().prepare("UPDATE subtitles SET drive_file_id=?,drive_status='PENDING' WHERE id=? AND drive_file_id IS NULL").bind(reservedId, subtitleId).run();
+      reservedId = (await db().prepare("SELECT drive_file_id FROM subtitles WHERE id=?").bind(subtitleId).first<Row>())!.drive_file_id;
+    }
+    const token = await driveAccessToken(user, credentials);
+    const existing = await fetch(`https://www.googleapis.com/drive/v3/files/${reservedId}?fields=id,webViewLink`, {headers:{Authorization:`Bearer ${token}`}, signal:AbortSignal.timeout(12000)});
+    if (existing.ok) { const file = await existing.json() as Row; return {id:file.id,url:file.webViewLink || `https://drive.google.com/file/d/${file.id}/view`}; }
+    if (existing.status !== 404) throw new Error(`Drive readback returned HTTP ${existing.status}`);
+  }
+  const metadata = { ...(reservedId ? {id: reservedId} : {}), name: safeDriveName(name), ...(parent ? { parents: [parent] } : {}) };
   const boundary = `udemy-${crypto.randomUUID()}`;
   const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: text/vtt\r\n\r\n${content}\r\n--${boundary}--`;
   const response = await driveRequest(user, credentials, "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink", {
@@ -701,18 +755,20 @@ async function deleteDriveFile(user: UserRow, credentials: Row, fileId: string) 
   if (!response.ok && response.status !== 404) throw new ApiError(response.status, `Google Drive returned HTTP ${response.status}.`);
 }
 
+function canonicalLanguage(language: string) {
+  return language.trim().toLowerCase().split(/[-_]/)[0] || "en";
+}
+
 async function storeSubtitle(user: UserRow, lecture: Row, language: string, content: string, type: string) {
-  const key = `${user.id}/${lecture.course_id}/${lecture.lecture_id}/${encodeURIComponent(language)}.vtt`;
+  const identity = canonicalLanguage(language);
+  const key = `${user.id}/${lecture.course_id}/${lecture.lecture_id}/${identity}.vtt`;
   await bucket().put(key, content, { httpMetadata: { contentType: "text/vtt; charset=utf-8" } });
-  const existing = await db().prepare("SELECT * FROM subtitles WHERE lecture_id=? AND language=?").bind(lecture.id, language).first<Row>();
-  if (existing) {
-    await db().prepare(`UPDATE subtitles SET subtitle_type=?,status='COMPLETED',storage_key=?,error_message=NULL,error_category=NULL,last_processed_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .bind(type, key, now(), existing.id).run();
-    return await db().prepare("SELECT * FROM subtitles WHERE id=?").bind(existing.id).first<Row>();
-  }
-  const insert = await db().prepare(`INSERT INTO subtitles (lecture_id,language,subtitle_type,status,storage_key,last_processed_at)
-    VALUES (?,?,?,'COMPLETED',?,?)`).bind(lecture.id, language, type, key, now()).run();
-  return await db().prepare("SELECT * FROM subtitles WHERE id=?").bind(insert.meta.last_row_id).first<Row>();
+  await db().prepare(`INSERT INTO subtitles (lecture_id,language,caption_language,subtitle_type,status,storage_key,last_processed_at)
+    VALUES (?,?,?,?,'COMPLETED',?,?) ON CONFLICT(lecture_id,language) DO UPDATE SET
+    caption_language=excluded.caption_language,subtitle_type=excluded.subtitle_type,status='COMPLETED',
+    storage_key=excluded.storage_key,error_message=NULL,error_category=NULL,last_processed_at=excluded.last_processed_at,updated_at=CURRENT_TIMESTAMP`)
+    .bind(lecture.id, identity, language, type, key, now()).run();
+  return db().prepare("SELECT * FROM subtitles WHERE lecture_id=? AND language=?").bind(lecture.id, identity).first<Row>();
 }
 
 function srtToVtt(input: string) {
@@ -763,6 +819,7 @@ async function subtitleContent(lecture: Row, language: string, cookies: CookieBu
 }
 
 async function processSubtitle(user: UserRow, lecture: Row, language: string) {
+  language = canonicalLanguage(language);
   const database = db();
   const cookies = await getCookieBundle(user.id).catch(() => null);
   const record = await database.prepare("SELECT * FROM subtitles WHERE lecture_id=? AND language=?").bind(lecture.id, language).first<Row>();
@@ -771,46 +828,73 @@ async function processSubtitle(user: UserRow, lecture: Row, language: string) {
     else await database.prepare("INSERT INTO subtitles (lecture_id,language,subtitle_type,status,error_category,error_message,last_processed_at) VALUES (?,?,'NONE','NO_SUBTITLES','UNSUPPORTED_TYPE',?,?)").bind(lecture.id, language, "Lecture is not a video.", now()).run();
     return false;
   }
-  let result: Row;
-  try { result = await subtitleContent(lecture, language, cookies); }
-  catch (error) { result = { error: error instanceof Error ? error.message : "Subtitle retrieval failed.", category: "PROCESSING_ERROR" }; }
-  if (!result.content) {
-    const category = result.category === "NO_SUBTITLES" ? "NO_SUBTITLES" : "FAILED";
-    if (record) await database.prepare("UPDATE subtitles SET status=?,subtitle_type='NONE',error_category=?,error_message=?,last_processed_at=? WHERE id=?").bind(category, result.category, result.error, now(), record.id).run();
-    else await database.prepare("INSERT INTO subtitles (lecture_id,language,subtitle_type,status,error_category,error_message,last_processed_at) VALUES (?,?,'NONE',?,?,?,?)").bind(lecture.id, language, category, result.category, result.error, now()).run();
-    return false;
+  let subtitle = record?.status === "COMPLETED" && record.storage_key ? record : null;
+  let content: string;
+  if (subtitle) {
+    if (subtitle.drive_status === "COMPLETED" || !user.drive_credentials) return true;
+    const stored = await bucket().get(subtitle.storage_key);
+    if (!stored) throw new Error("Stored caption is missing; restore or reimport it before Drive sync.");
+    content = await stored.text();
+  } else {
+    let result: Row;
+    try { result = await subtitleContent(lecture, language, cookies); }
+    catch (error) { throw error; }
+    if (!result.content) {
+      await database.prepare(`INSERT INTO subtitles (lecture_id,language,subtitle_type,status,error_category,error_message,last_processed_at)
+        VALUES (?,?,'NONE',?,?,?,?) ON CONFLICT(lecture_id,language) DO UPDATE SET status=excluded.status,error_category=excluded.error_category,error_message=excluded.error_message,last_processed_at=excluded.last_processed_at`)
+        .bind(lecture.id, language, result.category === "NO_SUBTITLES" ? "NO_SUBTITLES" : "FAILED", result.category, result.error, now()).run();
+      if (result.category !== "NO_SUBTITLES") throw new Error(result.error);
+      return false;
+    }
+    content = result.content;
+    subtitle = await storeSubtitle(user, lecture, result.language, content, result.type);
   }
-  const subtitle = await storeSubtitle(user, lecture, result.language, result.content, result.type);
+  if (!subtitle) throw new Error("Saved subtitle could not be read back.");
   const credentials = await normalizeDriveCredentials(user);
   if (credentials) {
     try {
-      const uploaded = await driveUpload(user, credentials, `${String(lecture.position).padStart(3, "0")} - ${lecture.title}.vtt`, result.content,
-        [driveConfig().folderName, safeDriveName(lecture.course_title), `Section ${String(lecture.section_position).padStart(2, "0")} - ${safeDriveName(lecture.section_title)}`]);
-      await database.prepare("UPDATE subtitles SET drive_file_id=?,drive_file_url=?,error_message=NULL,error_category=NULL WHERE id=?").bind(uploaded.id, uploaded.url, subtitle.id).run();
+      const uploaded = await driveUpload(user, credentials, `${String(lecture.position).padStart(3, "0")} - ${lecture.title}.vtt`, content,
+        [driveConfig().folderName, safeDriveName(lecture.course_title), `Section ${String(lecture.section_position).padStart(2, "0")} - ${safeDriveName(lecture.section_title)}`], subtitle.id);
+      await database.prepare("UPDATE subtitles SET drive_file_id=?,drive_file_url=?,drive_status='COMPLETED',drive_error=NULL WHERE id=?").bind(uploaded.id, uploaded.url, subtitle.id).run();
     } catch (error) {
-      await database.prepare("UPDATE subtitles SET error_message=?,error_category='DRIVE_ERROR' WHERE id=?").bind(`Saved to Site storage. Drive upload failed: ${error instanceof Error ? error.message : "unknown error"}`, subtitle.id).run();
+      await database.prepare("UPDATE subtitles SET drive_status='FAILED',drive_error=? WHERE id=?").bind(error instanceof Error ? error.message : "Drive upload failed", subtitle.id).run();
+      throw error;
     }
   }
   return true;
 }
 
-async function processPendingJob(userId: number) {
+async function retryJob(job: Row, error: unknown) {
+  const attempt = Number(job.attempts || 0) + 1;
+  const detail = error instanceof Error ? error.message : "Processing failed";
+  await db().prepare(`UPDATE processing_jobs SET status=?,attempts=?,retry_at=unixepoch()+?,error_message=?,progress_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status!='CANCELLED'`)
+    .bind(attempt >= 8 ? "FAILED" : "PENDING", attempt, Math.min(3600, 15 * 2 ** attempt), detail,
+      attempt >= 8 ? "Retries exhausted. Retry this job after correcting the error." : `Retry ${attempt}/8 queued; progress saved.`, job.id).run();
+}
+
+export async function processPendingJob(userId: number) {
+  const token = crypto.randomUUID();
+  const claim = await db().prepare(`INSERT INTO job_leases(user_id,token,expires_at) VALUES (?,?,unixepoch()+600)
+    ON CONFLICT(user_id) DO UPDATE SET token=excluded.token,expires_at=excluded.expires_at WHERE job_leases.expires_at < unixepoch()`)
+    .bind(userId,token).run();
+  if (!claim.meta.changes) return false;
+  try { await advanceJob(userId); return true; }
+  finally { await db().prepare("DELETE FROM job_leases WHERE user_id=? AND token=?").bind(userId,token).run(); }
+}
+
+async function advanceJob(userId: number) {
   const database = db();
   const job = await database.prepare(`SELECT * FROM processing_jobs WHERE user_id=? AND (
-    status='PENDING' OR (status='PROCESSING' AND job_type='SUBTITLE_BATCH') OR
-    (status='PROCESSING' AND job_type='COURSE_IMPORT' AND updated_at < datetime('now','-1 minute'))
+    (status IN ('PENDING','PROCESSING') AND (retry_at IS NULL OR retry_at <= unixepoch()))
   ) ORDER BY created_at,id LIMIT 1`).bind(userId).first<Row>();
   if (!job) return;
   const payload = JSON.parse(job.payload_json || "{}");
   if (job.job_type === "COURSE_IMPORT") {
-    const claimed = await database.prepare(`UPDATE processing_jobs SET status='PROCESSING',updated_at=CURRENT_TIMESTAMP
-      WHERE id=? AND (status='PENDING' OR updated_at < datetime('now','-1 minute'))`).bind(job.id).run();
-    if (!claimed.meta.changes) return;
     await importCourseStep(job, payload);
     return;
   }
   if (job.job_type !== "SUBTITLE_BATCH") return;
-  await database.prepare("UPDATE processing_jobs SET status='PROCESSING',updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(job.id).run();
+  await database.prepare("UPDATE processing_jobs SET status='PROCESSING',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status!='CANCELLED'").bind(job.id).run();
   const ids: number[] = payload.lecture_ids || [];
   const cursor = Number(payload.cursor || 0);
   if (cursor >= ids.length) {
@@ -824,16 +908,14 @@ async function processPendingJob(userId: number) {
   if (user && lecture) {
     try { succeeded = await processSubtitle(user, lecture, payload.language || "en"); }
     catch (error) {
-      const detail = error instanceof Error ? error.message : "Subtitle processing failed.";
-      const existing = await database.prepare("SELECT id FROM subtitles WHERE lecture_id=? AND language=?").bind(lecture.id, payload.language || "en").first<Row>();
-      if (existing) await database.prepare("UPDATE subtitles SET status='FAILED',error_category='PROCESSING_ERROR',error_message=?,last_processed_at=? WHERE id=?").bind(detail, now(), existing.id).run();
-      else await database.prepare("INSERT INTO subtitles (lecture_id,language,subtitle_type,status,error_category,error_message,last_processed_at) VALUES (?,?,'NONE','FAILED','PROCESSING_ERROR',?,?)").bind(lecture.id, payload.language || "en", detail, now()).run();
+      await retryJob(job, error);
+      return;
     }
   }
   const next = cursor + 1;
   const finished = next >= ids.length;
-  await database.prepare(`UPDATE processing_jobs SET completed_items=completed_items+?,failed_items=failed_items+?,payload_json=?,status=?,progress_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-    .bind(succeeded ? 1 : 0, succeeded ? 0 : 1, JSON.stringify({ ...payload, cursor: next }), finished ? "COMPLETED" : "PROCESSING",
+  await database.prepare(`UPDATE processing_jobs SET completed_items=completed_items+?,failed_items=failed_items+?,payload_json=?,status=CASE WHEN status='CANCELLED' THEN status ELSE ? END,progress_message=?,attempts=0,retry_at=NULL,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+    .bind(succeeded ? 1 : 0, succeeded ? 0 : 1, JSON.stringify({ ...payload, cursor: next }), finished ? "COMPLETED" : "PENDING",
       finished ? `Batch completed: ${Number(job.completed_items) + Number(succeeded)} succeeded, ${Number(job.failed_items) + Number(!succeeded)} failed or had no subtitles.` : `Processing (${next}/${ids.length}): ${lecture?.title || "lecture"}`, job.id).run();
 }
 
@@ -853,7 +935,7 @@ async function importCourseStep(job: Row, payload: Row) {
   try {
     const saveStep = async (nextPayload: Row, message: string, courseId: number | null = null, complete = false) => {
       const found = Number(nextPayload.lecture_count || 0);
-      await database.prepare(`UPDATE processing_jobs SET course_id=COALESCE(?,course_id),status=?,completed_items=?,total_items=?,payload_json=?,progress_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      await database.prepare(`UPDATE processing_jobs SET course_id=COALESCE(?,course_id),status=CASE WHEN status='CANCELLED' THEN status ELSE ? END,completed_items=?,total_items=?,payload_json=?,progress_message=?,attempts=0,retry_at=NULL,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
         .bind(courseId, complete ? "COMPLETED" : "PENDING", complete ? Math.max(1, found) : found, complete ? Math.max(1, found) : 0,
           JSON.stringify(nextPayload), message, job.id).run();
     };
@@ -988,9 +1070,7 @@ async function importCourseStep(job: Row, payload: Row) {
         endpoint_index: nextEndpoint < endpoints.length ? nextEndpoint : 0 }, `Trying another Udemy curriculum endpoint for ${payload.title}.`);
     }
   } catch (error) {
-    const detail = error instanceof Error ? error.message : "Course import failed.";
-    await database.prepare("UPDATE processing_jobs SET status='FAILED',failed_items=1,error_message=?,progress_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
-      .bind(detail, `Import failed: ${detail}`, job.id).run();
+    await retryJob(job, error);
   }
 }
 
@@ -999,9 +1079,17 @@ async function api(request: Request) {
   const path = url.pathname.replace(/^\/api\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
   const method = request.method.toUpperCase();
   if (!path.length && method === "GET") return json({ service: "Udemy Subtitle Manager API", runtime: "ChatGPT Sites Worker" });
-  if (path[0] === "health" && method === "GET") return json({ status: "ok" });
+  if (path[0] === "health" && method === "GET") return json({ status: "ok", commit: releaseCommit });
   if (path[0] === "drive" && path[1] === "callback" && method === "GET") return driveCallback(request, url);
 
+  if (path.join("/") === "internal/jobs/run" && method === "POST") {
+    const secret = (env as any).JOB_RUNNER_SECRET;
+    if (!secret || request.headers.get("Authorization") !== `Bearer ${secret}`) return fail("Unauthorized",401);
+    const users = await db().prepare("SELECT DISTINCT user_id FROM processing_jobs WHERE status IN ('PENDING','PROCESSING') AND (retry_at IS NULL OR retry_at <= unixepoch()) ORDER BY updated_at LIMIT 8").all<Row>();
+    let advanced = 0;
+    for (const row of users.results) if (await processPendingJob(Number(row.user_id))) advanced++;
+    return json({advanced});
+  }
   const user = await currentUser();
   if (path[0] === "auth" && path[1] === "me" && method === "GET") return json(await apiUserProfile(user));
   if (path[0] === "auth" && path[1] === "logout" && method === "POST") return json({ message: "Signed out from ChatGPT." });

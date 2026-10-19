@@ -55,6 +55,10 @@ def test_import_and_sync_preserves_user_data(
     )
 
     course = db_session.query(Course).filter(Course.user_id == user_a.id).first()
+    db_session.refresh(job1)
+    assert job1.status == "COMPLETED"
+    assert job1.completed_items == job1.total_items == 4
+    assert "imported successfully" in job1.progress_message
     assert course is not None
     assert course.course_id == "999888"
     assert course.title == "Complete Python Masterclass"
@@ -146,3 +150,45 @@ def test_course_deletion_cleans_drive(client, user_a, user_a_headers, db_session
     # Course is gone from DB
     deleted = db_session.query(Course).filter(Course.id == c.id).first()
     assert deleted is None
+
+def test_curriculum_queries_are_batched(client, user_a, user_a_headers, db_session):
+    from sqlalchemy import event
+
+    course = Course(user_id=user_a.id, course_id="batch", title="Batch", url="https://www.udemy.com/course/batch/")
+    db_session.add(course)
+    db_session.flush()
+    for position in range(12):
+        section = Section(course_id=course.id, title=f"Section {position}", position=position)
+        db_session.add(section)
+        db_session.flush()
+        lecture = Lecture(section_id=section.id, lecture_id=str(position), title=f"Lecture {position}", url="https://www.udemy.com/", position=1, learning_status="IN_PROGRESS" if position == 0 else "COMPLETED")
+        db_session.add(lecture)
+        db_session.flush()
+        db_session.add(Subtitle(lecture_id=lecture.id, language="en", subtitle_type="MANUAL", status="COMPLETED"))
+    db_session.commit()
+    course_id = course.id
+    db_session.expunge_all()
+    queries = []
+    def record_query(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            queries.append(statement)
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", record_query)
+    try:
+        response = client.get(f"/api/courses/{course_id}", headers=user_a_headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total_sections"] == data["total_lectures"] == data["processed_subtitles"] == 12
+        assert data["completed_lectures"] == 11
+        assert data["next_lecture"]["learning_status"] == "IN_PROGRESS"
+        assert len(data["sections"]) == 12
+        assert len(data["sections"][0]["lectures"][0]["subtitles"]) == 1
+        assert len(queries) <= 6
+        queries.clear()
+        db_session.expunge_all()
+        response = client.get("/api/courses", headers=user_a_headers)
+        assert response.status_code == 200
+        assert response.json()["items"][0]["total_lectures"] == 12
+        assert len(queries) <= 7
+    finally:
+        event.remove(engine, "before_cursor_execute", record_query)

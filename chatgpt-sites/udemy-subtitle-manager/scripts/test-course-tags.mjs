@@ -1,0 +1,27 @@
+import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
+import { normalizeCourseTags, saveCourseTags } from "../app/lib/course-tags.ts";
+
+assert.deepEqual(normalizeCourseTags([" AI ", "ai", "Ｔｅｓｔ", "Test", "Tiếng Việt", "", "  Deep   learning "]), ["AI", "Test", "Tiếng Việt", "Deep learning"]);
+for (const input of [null, "AI", [1], ["a,b"], ["a\0b"], ["a".repeat(33)], Array.from({length:13},(_,i)=>`tag-${i}`)]) assert.throws(()=>normalizeCourseTags(input),TypeError);
+assert.equal(normalizeCourseTags(Array.from({length:12},(_,i)=>`tag-${i}`)).length,12);
+const database = new DatabaseSync(":memory:");
+database.exec("CREATE TABLE courses (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT, updated_at TEXT); INSERT INTO courses VALUES (1,11,'Original course',NULL),(2,22,'Other account',NULL);");
+const journal = JSON.parse(readFileSync(new URL("../drizzle/meta/_journal.json",import.meta.url),"utf8"));
+const migration = journal.entries.find((entry) => entry.tag === '0001_dark_toxin').tag;
+database.exec(readFileSync(new URL(`../drizzle/${migration}.sql`,import.meta.url),"utf8"));
+assert.equal(database.prepare("SELECT tags_json FROM courses WHERE id=1").get().tags_json,"[]");
+const d1 = {prepare(sql) {return {bind(...args) {return {async first() {return database.prepare(sql).get(...args) ?? null;}};}};}};
+assert.deepEqual(await saveCourseTags(d1,11,1,["AI", " ai ", "Deep learning"]),["AI","Deep learning"]);
+assert.deepEqual(JSON.parse(database.prepare("SELECT tags_json FROM courses WHERE id=1").get().tags_json),["AI","Deep learning"]);
+assert.equal(await saveCourseTags(d1,22,1,["Wrong owner"]),null);
+assert.equal(await saveCourseTags(d1,11,999,["Missing course"]),null);
+assert.deepEqual(JSON.parse(database.prepare("SELECT tags_json FROM courses WHERE id=1").get().tags_json),["AI","Deep learning"]);
+assert.deepEqual(await saveCourseTags(d1,11,1,["English"]),["English"]);
+assert.deepEqual(await saveCourseTags(d1,11,1,[]),[]);
+assert.equal(database.prepare("SELECT title FROM courses WHERE id=1").get().title,"Original course");
+assert.equal(database.prepare("SELECT tags_json FROM courses WHERE id=2").get().tags_json,"[]");
+await assert.rejects(saveCourseTags(d1,11,1,["x".repeat(33)]),TypeError);
+console.log("PASS: migration defaults preserve courses, Unicode/duplicate normalization, limits, persistent add/edit/remove, ownership isolation and missing course.");
+database.close();
