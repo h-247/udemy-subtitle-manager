@@ -838,7 +838,7 @@ async function processSubtitle(user: UserRow, lecture: Row, language: string) {
   } else {
     let result: Row;
     try { result = await subtitleContent(lecture, language, cookies); }
-    catch (error) { throw error; }
+    catch (error) { result = {error: error instanceof Error ? error.message : "Caption download failed", category: "PROCESSING_ERROR"}; }
     if (!result.content) {
       await database.prepare(`INSERT INTO subtitles (lecture_id,language,subtitle_type,status,error_category,error_message,last_processed_at)
         VALUES (?,?,'NONE',?,?,?,?) ON CONFLICT(lecture_id,language) DO UPDATE SET status=excluded.status,error_category=excluded.error_category,error_message=excluded.error_message,last_processed_at=excluded.last_processed_at`)
