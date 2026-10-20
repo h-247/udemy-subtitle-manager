@@ -12,6 +12,8 @@ INSERT INTO sections VALUES (1,1,'First',1),(2,1,'Second',2),(3,2,'Other course'
 INSERT INTO lectures VALUES (1,1,'1','Done',1,'COMPLETED'),(2,1,'2','Next',2,'NOT_STARTED'),(3,2,'3','Current',1,'IN_PROGRESS'),(4,3,'4','Private',1,'NOT_STARTED');
 INSERT INTO subtitles VALUES (1,1,'COMPLETED'),(2,3,'FAILED'),(3,4,'COMPLETED');`);
 sqlite.exec("ALTER TABLE lectures ADD COLUMN lecture_type TEXT NOT NULL DEFAULT 'video'");
+sqlite.exec("ALTER TABLE lectures ADD COLUMN url TEXT; ALTER TABLE lectures ADD COLUMN duration INTEGER; ALTER TABLE lectures ADD COLUMN chatgpt_url TEXT; ALTER TABLE lectures ADD COLUMN captions_json TEXT");
+sqlite.prepare("UPDATE lectures SET captions_json=?").run('x'.repeat(100000));
 let statements = 0, batches = 0;
 const database = {
   prepare(sql) { return { bind(...ids) { return {sql,ids}; } }; },
@@ -21,6 +23,7 @@ const source = readFileSync(new URL("../app/lib/api-worker.ts",import.meta.url),
 const js = ts.transpileModule(source+"\nexport { courseRead };",{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
 const {courseRead} = await import("data:text/javascript;base64,"+Buffer.from(js).toString("base64"));
 const data = await loadCourseRows(database,[1]);
+assert.equal(data.lectures.some(lecture=>"captions_json" in lecture),false,"UI queries must not transfer cached signed caption payloads");
 const detail = await courseRead({id:1,course_id:'course-1',title:'Course'},true,data);
 assert.equal(detail.total_sections,2);
 assert.equal(detail.total_lectures,3);
@@ -47,7 +50,7 @@ statements=0; batches=0;
 const large=await loadCourseRows(database,[1]);
 assert.equal((await courseRead({id:1},true,large)).total_lectures,1003);
 assert.equal(statements,3); assert.equal(batches,1);
-sqlite.exec("INSERT INTO lectures VALUES (1005,1,'article','Article',1005,'NOT_STARTED','article'); INSERT INTO subtitles VALUES (4,1,'COMPLETED'),(5,1005,'COMPLETED')");
+sqlite.exec("INSERT INTO lectures(id,section_id,lecture_id,title,position,learning_status,lecture_type) VALUES (1005,1,'article','Article',1005,'NOT_STARTED','article'); INSERT INTO subtitles VALUES (4,1,'COMPLETED'),(5,1005,'COMPLETED')");
 const mixed = await courseRead({id:1},true,await loadCourseRows(database,[1]));
 assert.equal(mixed.total_lectures,1004);
 assert.equal(mixed.subtitle_eligible_lectures,1003);

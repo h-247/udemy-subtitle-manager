@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, Suspense } from "react";
+import React, { useState, useEffect, useCallback, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "../lib/auth";
@@ -36,6 +36,7 @@ function CoursesListContent() {
 
   // Courses state
   const [courses, setCourses] = useState<Course[]>([]);
+  const courseRequestInFlight = useRef(false);
   const [coursesError, setCoursesError] = useState<string | null>(null);
   const [coursesLoading, setCoursesLoading] = useState(true);
   const [tagFilter, setTagFilter] = useState("all");
@@ -90,6 +91,8 @@ function CoursesListContent() {
   }, [toastMessage]);
 
   const loadCourses = useCallback(async (silent = false) => {
+    if (courseRequestInFlight.current) return;
+    courseRequestInFlight.current = true;
     if (!silent) setCoursesLoading(true);
     setCoursesError(null);
     try {
@@ -98,6 +101,7 @@ function CoursesListContent() {
     } catch (err) {
       setCoursesError(err instanceof Error ? err.message : "Failed to load courses.");
     } finally {
+      courseRequestInFlight.current = false;
       if (!silent) setCoursesLoading(false);
     }
   }, []);
