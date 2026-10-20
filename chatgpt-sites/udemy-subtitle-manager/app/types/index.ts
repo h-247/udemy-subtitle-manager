@@ -2,6 +2,7 @@ export type UdemySessionStatus =
   | 'CONNECTED'
   | 'EXPIRED_SESSION'
   | 'INVALID_COOKIES'
+  | 'VERIFICATION_FAILED'
   | 'AUTH_REQUIRED'
   | 'ACCESS_DENIED'
   | 'UNSUPPORTED_AUTH'

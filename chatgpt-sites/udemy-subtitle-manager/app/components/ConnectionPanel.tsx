@@ -54,13 +54,17 @@ export default function ConnectionPanel({ isOpen, onClose, onStatusChange }: Con
 
     try {
       const res = await api.udemy.uploadCookies(cookieFile || cookieText);
-      setStatusMessage(`Udemy cookies saved! Status: ${res.status}`);
+      setStatusMessage(res.status === "CONNECTED"
+        ? `Cookies saved and connection verified. Account: ${res.account_name || "Active"}.`
+        : `Cookies saved. Verification: ${res.status}. ${res.error_message || "Use Test Connection to check access again."}`);
       setCookieFile(null);
       setCookieText("");
-      await refreshUser();
-      onStatusChange();
+      try { await refreshUser(); onStatusChange(); }
+      catch { setErrorMessage("Cookies were saved, but the connection display could not refresh. Reopen this panel to check the status."); }
     } catch (err: unknown) {
-      setErrorMessage(err instanceof Error ? err.message : "Failed to upload cookies.");
+      setErrorMessage(err instanceof Error && /timed out|timeout/i.test(err.message)
+        ? "The save request timed out. Your input is retained. Please try Save & Verify Cookies again."
+        : err instanceof Error ? err.message : "Failed to upload cookies.");
     } finally {
       setLoading(false);
     }
@@ -272,6 +276,7 @@ export default function ConnectionPanel({ isOpen, onClose, onStatusChange }: Con
                 </div>
 
                 <textarea
+                  aria-label="Udemy cookie text"
                   rows={4}
                   placeholder={`Paste Netscape text or JSON array from Cookie-Editor / EditThisCookie:\n[\n  {"domain": ".ifg.udemy.com", "name": "access_token", "value": "..."}\n]`}
                   value={cookieText}

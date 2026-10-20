@@ -190,7 +190,7 @@ async function udemyValidation(jar: Record<string, string>, businessDomain: stri
   let lastStatus = 0;
   for (const host of hosts) {
     try {
-      const response = await udemyFetch(`https://${host}/api-2.0/users/me/`, jar);
+      const response = await udemyFetch(`https://${host}/api-2.0/users/me/`, jar, {signal:AbortSignal.timeout(4000)});
       lastStatus = response.status;
       if (response.ok) {
         const user = await response.json() as Row;
@@ -200,10 +200,10 @@ async function udemyValidation(jar: Record<string, string>, businessDomain: stri
       if (response.status === 403) return { status: "ACCESS_DENIED", accountName: null, error: "Udemy denied access to this session." };
       if (response.status === 401) return { status: "EXPIRED_SESSION", accountName: null, error: "Udemy session expired." };
     } catch {
-      return { status: "INVALID_COOKIES", accountName: null, error: "Could not connect to Udemy from the Sites runtime." };
+      return { status: "VERIFICATION_FAILED", accountName: null, error: "Udemy verification timed out or could not connect. Cookies are retained; try Test Connection again." };
     }
   }
-  return { status: lastStatus === 401 ? "EXPIRED_SESSION" : lastStatus === 403 ? "ACCESS_DENIED" : "INVALID_COOKIES", accountName: null, error: `Udemy returned HTTP ${lastStatus || "unknown"}.` };
+  return { status: lastStatus === 401 ? "EXPIRED_SESSION" : lastStatus === 403 ? "ACCESS_DENIED" : "VERIFICATION_FAILED", accountName: null, error: `Udemy returned HTTP ${lastStatus || "unknown"}.` };
 }
 
 function userProfile(user: UserRow, session: Row | null) {
@@ -233,18 +233,30 @@ function replaceUdemyDomain(value: string, newDomain: string) {
   } catch { return value; }
 }
 
+function udemyDomainUpdates(database: D1Database, userId: number, domain: string) {
+  if (!isUdemyDomain(domain)) throw new ApiError(400,"Invalid Udemy domain.");
+  // Only replace the URL authority; preserve lecture paths and query strings.
+  // Scope both updates to the signed-in owner and skip unrelated/existing URLs.
+  const host = "lower(substr(url,instr(url,'://')+3,instr(substr(url,instr(url,'://')+3)||'/','/')-1))";
+  const path = "CASE WHEN instr(substr(url,instr(url,'://')+3),'/')>0 THEN substr(url,instr(url,'://')+2+instr(substr(url,instr(url,'://')+3),'/')) ELSE '/' END";
+  const eligible = `(url LIKE 'https://%' OR url LIKE 'http://%') AND (${host}='udemy.com' OR ${host} LIKE '%.udemy.com') AND url != 'https://' || ? || ${path}`;
+  return [
+    database.prepare(`UPDATE courses SET url='https://' || ? || ${path} WHERE user_id=? AND ${eligible}`).bind(domain,userId,domain),
+    database.prepare(`UPDATE lectures SET url='https://' || ? || ${path} WHERE section_id IN
+      (SELECT s.id FROM sections s JOIN courses c ON c.id=s.course_id WHERE c.user_id=?) AND ${eligible}`).bind(domain,userId,domain),
+  ];
+}
+
 async function saveUdemySession(user: UserRow, bundle: CookieBundle, validation: Row) {
-  await db().prepare(`INSERT INTO udemy_sessions (user_id,encrypted_cookie_data,status,account_name,business_domain,error_message,last_validated_at)
-    VALUES (?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET encrypted_cookie_data=excluded.encrypted_cookie_data,status=excluded.status,
-    account_name=excluded.account_name,business_domain=excluded.business_domain,error_message=excluded.error_message,last_validated_at=excluded.last_validated_at,updated_at=CURRENT_TIMESTAMP`)
-    .bind(user.id, await encrypt(bundle.text), validation.status, validation.accountName, bundle.businessDomain, validation.error, now()).run();
-  const target = bundle.businessDomain || "www.udemy.com";
-  const courses = await db().prepare("SELECT id,url FROM courses WHERE user_id=?").bind(user.id).all<Row>();
-  for (const course of courses.results) {
-    await db().prepare("UPDATE courses SET url=? WHERE id=?").bind(replaceUdemyDomain(course.url, target), course.id).run();
-    const lectures = await db().prepare("SELECT l.id,l.url FROM lectures l JOIN sections s ON s.id=l.section_id WHERE s.course_id=?").bind(course.id).all<Row>();
-    for (const lecture of lectures.results) await db().prepare("UPDATE lectures SET url=? WHERE id=?").bind(replaceUdemyDomain(lecture.url, target), lecture.id).run();
-  }
+  const database = db();
+  const encrypted = await encrypt(bundle.text);
+  await database.batch([
+    database.prepare(`INSERT INTO udemy_sessions (user_id,encrypted_cookie_data,status,account_name,business_domain,error_message,last_validated_at)
+      VALUES (?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET encrypted_cookie_data=excluded.encrypted_cookie_data,status=excluded.status,
+      account_name=excluded.account_name,business_domain=excluded.business_domain,error_message=excluded.error_message,last_validated_at=excluded.last_validated_at,updated_at=CURRENT_TIMESTAMP`)
+      .bind(user.id, encrypted, validation.status, validation.accountName, bundle.businessDomain, validation.error, now()),
+    ...udemyDomainUpdates(database,user.id,bundle.businessDomain || "www.udemy.com"),
+  ]);
 }
 
 function udemyStatus(session: Row | null) {
@@ -266,7 +278,7 @@ async function udemyRoutes(request: Request, user: UserRow, path: string[], _url
     const bundle = parseCookieText(text);
     const validation = await udemyValidation(bundle.jar, bundle.businessDomain);
     await saveUdemySession(user, bundle, validation);
-    return json(udemyStatus(await getUdemySession(user.id)));
+    return json({...udemyStatus(await getUdemySession(user.id)),saved:true});
   }
   if (path[0] === "test-connection" && request.method === "POST") {
     if (!session?.encrypted_cookie_data) throw new ApiError(400, "No Udemy cookies have been uploaded.");
@@ -285,18 +297,8 @@ async function udemyRoutes(request: Request, user: UserRow, path: string[], _url
     const bundle = await getCookieBundle(user.id);
     if (!bundle) throw new ApiError(400, "No Udemy cookies found. Please upload cookies first.");
     const domain = bundle.businessDomain || "www.udemy.com";
-    const courses = await database.prepare("SELECT id,url FROM courses WHERE user_id=?").bind(user.id).all<Row>();
-    let coursesUpdated = 0, lecturesUpdated = 0;
-    for (const course of courses.results) {
-      const next = replaceUdemyDomain(course.url, domain);
-      if (next !== course.url) { await database.prepare("UPDATE courses SET url=? WHERE id=?").bind(next, course.id).run(); coursesUpdated++; }
-      const lectures = await database.prepare("SELECT l.id,l.url FROM lectures l JOIN sections s ON s.id=l.section_id WHERE s.course_id=?").bind(course.id).all<Row>();
-      for (const lecture of lectures.results) {
-        const lectureUrl = replaceUdemyDomain(lecture.url, domain);
-        if (lectureUrl !== lecture.url) { await database.prepare("UPDATE lectures SET url=? WHERE id=?").bind(lectureUrl, lecture.id).run(); lecturesUpdated++; }
-      }
-    }
-    return json({ status: "success", domain, courses_updated: coursesUpdated, lectures_updated: lecturesUpdated });
+    const results = await database.batch(udemyDomainUpdates(database,user.id,domain));
+    return json({ status: "success", domain, courses_updated: Number(results[0].meta.changes), lectures_updated: Number(results[1].meta.changes) });
   }
   if (path[0] === "disconnect" && request.method === "POST") {
     await database.prepare(`UPDATE udemy_sessions SET encrypted_cookie_data=NULL,status='DISCONNECTED',account_name=NULL,error_message=NULL,

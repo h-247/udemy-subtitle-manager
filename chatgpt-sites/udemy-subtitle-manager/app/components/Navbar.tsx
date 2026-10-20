@@ -38,6 +38,8 @@ export default function Navbar({ onOpenConnections, onOpenImport, wide = false }
           bg: "bg-amber-500/10 text-amber-400 border-amber-500/30",
           icon: <AlertCircle className="w-3.5 h-3.5 text-amber-400" />,
         };
+      case "VERIFICATION_FAILED":
+        return { text: "Udemy: Needs Check", bg: "bg-amber-500/10 text-amber-400 border-amber-500/30", icon: <AlertCircle className="w-3.5 h-3.5 text-amber-400" /> };
       case "ACCESS_DENIED":
       case "INVALID_COOKIES":
         return {
