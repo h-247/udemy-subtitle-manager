@@ -219,7 +219,11 @@ export const api = {
     async retry(jobId: number): Promise<ProcessingJob> { return request<ProcessingJob>(`/jobs/${jobId}/retry`, {method: "POST"}); },
     async list(courseId?: number): Promise<ProcessingJob[]> {
       const q = courseId ? `?course_id=${courseId}` : "";
-      return request<ProcessingJob[]>(`/jobs${q}`);
+      const jobs = await request<ProcessingJob[]>(`/jobs${q}`);
+      if (jobs.some((job) => job.status === "PENDING" || job.status === "PROCESSING")) {
+        void request("/jobs/run", {method:"POST"}).catch(() => {});
+      }
+      return jobs;
     },
 
     async get(jobId: number): Promise<ProcessingJob> {

@@ -94,7 +94,7 @@ export default function CourseImportModal({ isOpen, onClose, onSuccess }: Course
               placeholder="AI, English, To learn" className="w-full px-3.5 py-2.5 bg-[#1A1A1A] border border-[#333333] rounded-xl text-sm text-[#ECECEC] placeholder-[#737373] focus:outline-none focus:border-white" />
             <p className="text-[11px] text-[#A3A3A3]">Separate tags with commas. Up to 12 tags, 32 characters each.</p>
           </div>
-          <p className="text-xs text-[#A3A3A3]">The course curriculum imports first, then subtitles download and sync to connected Drive automatically. Background processing may take up to 5 minutes to start.</p>
+          <p className="text-xs text-[#A3A3A3]">The course curriculum imports first, then subtitles download and sync to connected Drive automatically. Processing starts in the background and continues after you close this page.</p>
           <div className="flex justify-end space-x-3 pt-3 border-t border-[#333333]">
             <button
               type="button"

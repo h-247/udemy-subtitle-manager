@@ -100,6 +100,8 @@ export type JobType = 'COURSE_IMPORT' | 'SUBTITLE_BATCH' | 'SUBTITLE_SINGLE';
 export type JobStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 
 export interface ProcessingJob {
+  attempts: number;
+  retry_at: number | null;
   id: number;
   user_id: number;
   course_id?: number | null;

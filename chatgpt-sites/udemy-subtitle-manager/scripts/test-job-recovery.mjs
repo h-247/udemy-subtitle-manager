@@ -89,3 +89,9 @@ await (await load()).processPendingJob(1);
 assert.equal(sql.prepare('SELECT job_type FROM processing_jobs WHERE id=?').get(second.id).job_type,'SUBTITLE_BATCH');
 assert.deepEqual(JSON.parse(sql.prepare('SELECT tags_json FROM courses WHERE id=1').get().tags_json),['New']);
 console.log('PASS: import tag validation, atomic auto-download handoff, video-only selection, restart without duplicate job or upload, transaction failure recovery');
+
+await worker.resumeUserJobs('missing-user');
+assert.equal(sql.prepare('SELECT status FROM processing_jobs WHERE id=?').get(second.id).status,'PENDING');
+await worker.resumeUserJobs('owner');
+assert.equal(sql.prepare('SELECT status FROM processing_jobs WHERE id=?').get(second.id).status,'COMPLETED');
+console.log('PASS: background resume drains persisted jobs for the trusted user without dashboard GET side effects');

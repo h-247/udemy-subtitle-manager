@@ -528,6 +528,7 @@ async function subtitleRoutes(request: Request, user: UserRow, path: string[], _
 
 async function jobRoutes(request: Request, user: UserRow, path: string[], url: URL) {
   const database = db();
+  if (path.length === 1 && path[0] === "run" && request.method === "POST") return json({scheduled:true},202);
   if (!path.length && request.method === "GET") {
     // Job reads are side-effect free; the unattended dispatcher advances work.
     const courseId = Number(url.searchParams.get("course_id") || 0);
@@ -574,6 +575,7 @@ function jobRead(row: Row) {
     id: Number(row.id), user_id: Number(row.user_id), course_id: row.course_id == null ? null : Number(row.course_id),
     job_type: row.job_type, status: row.status, total_items: Number(row.total_items),
     completed_items: Number(row.completed_items), failed_items: Number(row.failed_items),
+    attempts: Number(row.attempts || 0), retry_at: row.retry_at == null ? null : Number(row.retry_at),
     progress_message: row.progress_message ?? null, error_message: row.error_message ?? null,
     created_at: row.created_at, updated_at: row.updated_at,
   };
@@ -643,7 +645,7 @@ async function ownedCourse(userId: number, id: number) {
 }
 
 async function ownedLecture(userId: number, id: number) {
-  const lecture = await db().prepare(`SELECT l.*,s.course_id,c.user_id,c.title AS course_title,c.url AS course_url,s.title AS section_title,s.position AS section_position
+  const lecture = await db().prepare(`SELECT l.*,s.course_id,c.course_id AS udemy_course_id,c.user_id,c.title AS course_title,c.url AS course_url,s.title AS section_title,s.position AS section_position
     FROM lectures l JOIN sections s ON s.id=l.section_id JOIN courses c ON c.id=s.course_id
     WHERE l.id=? AND c.user_id=?`).bind(id, userId).first<Row>();
   if (!lecture) throw new ApiError(404, "Lecture not found.");
@@ -786,28 +788,36 @@ function chooseCaption(captions: Caption[], language: string) {
 
 async function subtitleContent(lecture: Row, language: string, cookies: CookieBundle | null) {
   let captions: Caption[] = [];
-  try { captions = JSON.parse(lecture.captions_json || "[]") as Caption[]; } catch { captions = []; }
-  if (!captions.length && cookies) {
+  try { captions = JSON.parse(lecture.captions_json || "[]") as Caption[]; } catch { /* Refresh malformed cache. */ }
+  const refresh = async () => {
+    if (!cookies) throw new Error("Caption link expired. Reconnect your Udemy session to refresh subtitle links.");
+    if (!lecture.udemy_course_id) throw new Error("Udemy course ID is missing. Re-sync the course curriculum.");
     const host = new URL(lecture.course_url).hostname;
-    const url = new URL(`https://${host}/api-2.0/users/me/subscribed-courses/${lecture.course_id}/lectures/${lecture.lecture_id}/`);
+    const url = new URL(`https://${host}/api-2.0/users/me/subscribed-courses/${encodeURIComponent(lecture.udemy_course_id)}/lectures/${encodeURIComponent(lecture.lecture_id)}/`);
     url.searchParams.set("fields[lecture]", "title,asset,transcript"); url.searchParams.set("fields[asset]", "@all");
     const response = await udemyFetch(url.toString(), cookies.jar);
-    if (response.ok) {
-      const data = await response.json() as Row;
-      captions = data.asset?.captions || data.asset?.subtitles || [];
-      if (captions.length) await db().prepare("UPDATE lectures SET captions_json=? WHERE id=?").bind(JSON.stringify(captions), lecture.id).run();
-    }
+    if (!response.ok) throw new Error(`Udemy lecture refresh returned HTTP ${response.status}. ${[401,403].includes(response.status) ? "Refresh your Udemy session cookies and confirm course access." : "Please retry later."}`);
+    const data = await response.json() as Row;
+    captions = data.asset?.captions || data.asset?.subtitles || [];
+    await db().prepare("UPDATE lectures SET captions_json=? WHERE id=?").bind(JSON.stringify(captions), lecture.id).run();
+  };
+  let refreshed = false;
+  if (!chooseCaption(captions,language).caption && cookies) { await refresh(); refreshed = true; }
+  for (;;) {
+    const selected = chooseCaption(captions, language);
+    const captionUrl = selected.caption?.url || selected.caption?.download_url;
+    if (!captionUrl) return { error: "No subtitles found for this lecture.", category: "NO_SUBTITLES" };
+    const parsedUrl = new URL(captionUrl);
+    if (parsedUrl.protocol !== "https:") return { error: "Udemy returned an unsafe caption URL.", category: "CAPTION_ERROR" };
+    // Signed CDN URLs need no Udemy cookies or bearer token. Never leak those to CDN hosts.
+    const response = await fetch(parsedUrl.toString(), {headers:{"User-Agent":UDEMY_UA,Accept:"text/vtt, text/plain, */*",Referer:lecture.course_url},signal:AbortSignal.timeout(12000)});
+    if ([401,403,404].includes(response.status) && !refreshed) { await refresh(); refreshed = true; continue; }
+    if (!response.ok) return { error: `Caption download returned HTTP ${response.status} after ${refreshed ? "refreshing" : "reading"} the subtitle link.`, category: "CAPTION_ERROR" };
+    const raw = await response.text();
+    if (/^\s*</.test(raw) || !/\d{2}:\d{2}[.,]\d{3}\s*-->/.test(raw)) return {error:"Udemy returned an invalid caption document instead of subtitle cues.",category:"CAPTION_ERROR"};
+    const finalLanguage = String(selected.caption?.locale_id || selected.caption?.lang || selected.caption?.language || language);
+    return { content: normalizeVtt(raw), type: selected.type, language: finalLanguage };
   }
-  const selected = chooseCaption(captions, language);
-  const captionUrl = selected.caption?.url || selected.caption?.download_url;
-  if (!captionUrl) return { error: "No subtitles found for this lecture.", category: "NO_SUBTITLES" };
-  const parsedUrl = new URL(captionUrl);
-  if (parsedUrl.protocol !== "https:") return { error: "Udemy returned an unsafe caption URL.", category: "CAPTION_ERROR" };
-  const response = await udemyFetch(parsedUrl.toString(), cookies?.jar || {});
-  if (!response.ok) return { error: `Caption download returned HTTP ${response.status}.`, category: response.status === 403 ? "ACCESS_DENIED" : "CAPTION_ERROR" };
-  const content = normalizeVtt(await response.text());
-  const finalLanguage = String(selected.caption?.locale_id || selected.caption?.lang || selected.caption?.language || language);
-  return { content, type: selected.type, language: finalLanguage };
 }
 
 async function processSubtitle(user: UserRow, lecture: Row, language: string) {
@@ -862,6 +872,18 @@ async function retryJob(job: Row, error: unknown) {
   await db().prepare(`UPDATE processing_jobs SET status=?,attempts=?,retry_at=unixepoch()+?,error_message=?,progress_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status!='CANCELLED'`)
     .bind(attempt >= 8 ? "FAILED" : "PENDING", attempt, Math.min(3600, 15 * 2 ** attempt), detail,
       attempt >= 8 ? "Retries exhausted. Retry this job after correcting the error." : `Retry ${attempt}/8 queued; progress saved.`, job.id).run();
+}
+
+// Invoked using the trusted Sites identity after a successful enqueue/resume POST.
+// The Worker owns this promise with waitUntil, so closing the browser does not cancel it.
+export async function resumeUserJobs(platformUserId: string, budgetMs = 20_000) {
+  const user = await db().prepare("SELECT id FROM users WHERE platform_user_id=? AND is_active=1").bind(platformUserId).first<Row>();
+  if (!user) return;
+  const deadline = Date.now() + budgetMs;
+  do {
+    const ready = await db().prepare("SELECT id FROM processing_jobs WHERE user_id=? AND status IN ('PENDING','PROCESSING') AND (retry_at IS NULL OR retry_at<=unixepoch()) LIMIT 1").bind(user.id).first<Row>();
+    if (!ready || !await processPendingJob(Number(user.id))) return;
+  } while (Date.now() < deadline);
 }
 
 export async function processPendingJob(userId: number) {

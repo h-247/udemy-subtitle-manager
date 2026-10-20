@@ -27,7 +27,7 @@ export default function JobProgressBar({ jobs, onCancelJob }: JobProgressBarProp
           >
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center space-x-2.5">
-                <Loader2 className="w-4 h-4 text-sky-400 animate-spin" />
+                {job.status === "FAILED" ? <AlertCircle className="w-4 h-4 text-rose-400" /> : <Loader2 className="w-4 h-4 text-sky-400 animate-spin" />}
                 <span className="text-sm font-semibold text-[#ECECEC]">
                   {job.job_type === "COURSE_IMPORT" ? "Importing Course Curriculum" : "Processing Subtitles"}
                 </span>
@@ -46,14 +46,16 @@ export default function JobProgressBar({ jobs, onCancelJob }: JobProgressBarProp
 
             {/* Progress message */}
             <p className="text-xs text-[#A3A3A3] mb-2 truncate">
-              {job.error_message || job.progress_message || "Queued for background processing (up to 5 minutes)."}
+              {job.progress_message || "Queued for background processing."}
             </p>
 
+            {job.error_message && <p role="alert" className="text-xs text-rose-300 mb-2">{job.error_message}</p>}
+            {job.retry_at && job.status === "PENDING" && <p className="text-xs text-amber-300 mb-2">Retry {job.attempts}/8 scheduled for {new Date(job.retry_at * 1000).toLocaleTimeString()}.</p>}
             {/* Progress bar */}
             <div className="w-full bg-[#1A1A1A] h-2 rounded-full overflow-hidden border border-[#333333]">
               <div
                 className={`bg-white h-full rounded-full transition-all duration-300 ${!hasKnownTotal ? "animate-pulse" : ""}`}
-                style={{ width: hasKnownTotal ? `${Math.max(5, percent)}%` : "38%" }}
+                style={{ width: hasKnownTotal ? `${percent}%` : "38%" }}
               />
             </div>
 
