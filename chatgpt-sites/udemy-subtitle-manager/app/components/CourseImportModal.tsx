@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import { normalizeCourseTags } from "../lib/course-tags";
 import { api } from "../lib/api";
 import { ProcessingJob } from "../types";
 import { X, BookOpen, AlertCircle, Loader2 } from "lucide-react";
@@ -13,6 +14,7 @@ interface CourseImportModalProps {
 
 export default function CourseImportModal({ isOpen, onClose, onSuccess }: CourseImportModalProps) {
   const [url, setUrl] = useState("");
+  const [tags, setTags] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -26,9 +28,10 @@ export default function CourseImportModal({ isOpen, onClose, onSuccess }: Course
     setError(null);
 
     try {
-      const job = await api.courses.importCourse(url.trim());
-      onSuccess(`Import started for Job #${job.id}. You can follow its progress below.`, job);
+      const job = await api.courses.importCourse(url.trim(), normalizeCourseTags(tags.split(",")));
+      onSuccess(`Import started for Job #${job.id}. Subtitles will download automatically after the curriculum is imported.`, job);
       setUrl("");
+      setTags("");
       onClose();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to import course.");
@@ -85,6 +88,13 @@ export default function CourseImportModal({ isOpen, onClose, onSuccess }: Course
             </div>
           </div>
 
+          <div className="space-y-1.5">
+            <label htmlFor="import-course-tags" className="block text-sm font-medium text-[#ECECEC]">Tags (optional)</label>
+            <input id="import-course-tags" value={tags} onChange={(event) => setTags(event.target.value)} disabled={loading}
+              placeholder="AI, English, To learn" className="w-full px-3.5 py-2.5 bg-[#1A1A1A] border border-[#333333] rounded-xl text-sm text-[#ECECEC] placeholder-[#737373] focus:outline-none focus:border-white" />
+            <p className="text-[11px] text-[#A3A3A3]">Separate tags with commas. Up to 12 tags, 32 characters each.</p>
+          </div>
+          <p className="text-xs text-[#A3A3A3]">The course curriculum imports first, then subtitles download and sync to connected Drive automatically. Background processing may take up to 5 minutes to start.</p>
           <div className="flex justify-end space-x-3 pt-3 border-t border-[#333333]">
             <button
               type="button"
@@ -100,7 +110,7 @@ export default function CourseImportModal({ isOpen, onClose, onSuccess }: Course
               className="px-4 py-2 text-sm font-semibold text-black bg-white hover:bg-neutral-200 disabled:opacity-50 rounded-xl transition-colors flex items-center space-x-2 shadow-sm"
             >
               {loading && <Loader2 className="w-4 h-4 animate-spin text-black" />}
-              <span>{loading ? "Importing..." : "Import Course"}</span>
+              <span>{loading ? "Importing..." : "Import & Download Subtitles"}</span>
             </button>
           </div>
         </form>

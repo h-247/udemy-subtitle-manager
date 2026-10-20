@@ -464,7 +464,7 @@ function CourseContentDetail() {
                 <a href={formatUdemyUrl(course.url, user?.udemy_business_domain)} target="_blank" rel="noopener noreferrer" className="hover:underline">{course.title}</a>
               </h1>
 
-              <CourseTags courseId={course.id} tags={course.tags} onSaved={(tags) => setCourse((current) => current ? { ...current, tags } : current)} />
+              <CourseTags tags={course.tags} />
 
               <div className="flex flex-wrap items-center gap-4 text-xs text-[#A3A3A3] pt-1">
                 <a

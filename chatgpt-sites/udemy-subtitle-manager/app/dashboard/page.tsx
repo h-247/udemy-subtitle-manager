@@ -336,7 +336,7 @@ function CoursesListContent() {
                   </div>
 
                   <div className="mt-2">
-                    <CourseTags courseId={course.id} tags={course.tags} onSelect={(tag) => setTagFilter(`tag:${tag.toLowerCase()}`)} onSaved={(tags) => setCourses((current) => current.map((item) => item.id === course.id ? { ...item, tags } : item))} />
+                    <CourseTags tags={course.tags} onSelect={(tag) => setTagFilter(`tag:${tag.toLowerCase()}`)} />
                   </div>
                   {/* Bottom Footer & CTA */}
                   <div className="pt-2 mt-2 border-t border-[#333333] space-y-1">

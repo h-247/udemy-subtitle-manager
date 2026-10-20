@@ -127,10 +127,10 @@ export const api = {
   },
 
   courses: {
-    async importCourse(url: string): Promise<ProcessingJob> {
+    async importCourse(url: string, tags: string[] = []): Promise<ProcessingJob> {
       return request<ProcessingJob>("/courses/import", {
         method: "POST",
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url, tags }),
       });
     },
 
@@ -144,13 +144,6 @@ export const api = {
 
     async get(courseId: number): Promise<Course> {
       return request<Course>(`/courses/${courseId}`);
-    },
-
-    async updateTags(courseId: number, tags: string[]): Promise<{ tags: string[] }> {
-      return request<{ tags: string[] }>(`/courses/${courseId}/tags`, {
-        method: "PATCH",
-        body: JSON.stringify({ tags }),
-      });
     },
 
     async sync(courseId: number): Promise<ProcessingJob> {

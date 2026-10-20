@@ -1,5 +1,5 @@
 import { releaseCommit } from "./release";
-import { saveCourseTags } from "./course-tags";
+import { normalizeCourseTags } from "./course-tags";
 import { loadCourseRows } from "./course-reader";
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../chatgpt-auth";
@@ -354,7 +354,10 @@ async function courseRoutes(request: Request, user: UserRow, path: string[], url
   if (path.length === 1 && path[0] === "import" && request.method === "POST") {
     const payload = await bodyJson(request);
     const normalized = validUdemyUrl(String(payload.url || ""));
-    return json(await ensureJob(user.id, "COURSE_IMPORT", null, { url: normalized.url }, 1), 202);
+    let tags: string[];
+    try { tags = normalizeCourseTags(payload.tags ?? []); }
+    catch (error) { throw new ApiError(400, error instanceof Error ? error.message : "Invalid tags."); }
+    return json(await ensureJob(user.id, "COURSE_IMPORT", null, { url: normalized.url, tags, download_subtitles: true }, 1), 202);
   }
   if (path.length === 0 && request.method === "GET") {
     const page = safeInt(url.searchParams.get("page"), 1, 1, 1_000_000);
@@ -395,17 +398,6 @@ async function courseRoutes(request: Request, user: UserRow, path: string[], url
   }
   const id = Number(path[0]);
   if (!Number.isInteger(id) || id <= 0) return fail("Not found.", 404);
-  if (path.length === 2 && path[1] === "tags" && request.method === "PATCH") {
-    const payload = await bodyJson(request);
-    let tags: string[] | null;
-    try { tags = await saveCourseTags(database, user.id, id, payload.tags); }
-    catch (error) {
-      if (error instanceof TypeError) throw new ApiError(400, error.message);
-      throw error;
-    }
-    if (!tags) throw new ApiError(404, "Course not found.");
-    return json({ tags });
-  }
   if (path.length === 2 && path[1] === "sync" && request.method === "POST") {
     const course = await ownedCourse(user.id, id);
     return json(await ensureJob(user.id, "COURSE_IMPORT", id, { url: course.url }, 1), 202);
@@ -935,6 +927,27 @@ async function importCourseStep(job: Row, payload: Row) {
   try {
     const saveStep = async (nextPayload: Row, message: string, courseId: number | null = null, complete = false) => {
       const found = Number(nextPayload.lecture_count || 0);
+      if (complete && nextPayload.download_subtitles) {
+        const importedCourseId = Number(courseId ?? nextPayload.local_course_id);
+        const lectures = await database.prepare(`SELECT l.id FROM lectures l JOIN sections s ON s.id=l.section_id
+          JOIN courses c ON c.id=s.course_id WHERE c.id=? AND c.user_id=? AND l.lecture_type='video' ORDER BY s.position,l.position`)
+          .bind(importedCourseId, job.user_id).all<Row>();
+        const ids = lectures.results.map((lecture) => Number(lecture.id));
+        // One transaction saves tags and hands the same durable job to the next stage.
+        // A restart sees either the import checkpoint or the subtitle checkpoint.
+        await database.batch([
+          database.prepare(`UPDATE courses SET tags_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?
+            AND EXISTS(SELECT 1 FROM processing_jobs WHERE id=? AND job_type='COURSE_IMPORT' AND status!='CANCELLED')`)
+            .bind(JSON.stringify(normalizeCourseTags(nextPayload.tags ?? [])), importedCourseId, job.user_id, job.id),
+          database.prepare(`UPDATE processing_jobs SET course_id=?,job_type='SUBTITLE_BATCH',status=?,
+            completed_items=0,failed_items=0,total_items=?,payload_json=?,progress_message=?,attempts=0,retry_at=NULL,error_message=NULL,updated_at=CURRENT_TIMESTAMP
+            WHERE id=? AND job_type='COURSE_IMPORT' AND status!='CANCELLED'`)
+            .bind(importedCourseId, ids.length ? "PENDING" : "COMPLETED", ids.length,
+              JSON.stringify({lecture_ids:ids,language:"en",cursor:0}),
+              ids.length ? `Course imported. Automatically downloading subtitles for ${ids.length} video lectures.` : "Course imported. No video lectures to download subtitles for.", job.id),
+        ]);
+        return;
+      }
       await database.prepare(`UPDATE processing_jobs SET course_id=COALESCE(?,course_id),status=CASE WHEN status='CANCELLED' THEN status ELSE ? END,completed_items=?,total_items=?,payload_json=?,progress_message=?,attempts=0,retry_at=NULL,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
         .bind(courseId, complete ? "COMPLETED" : "PENDING", complete ? Math.max(1, found) : found, complete ? Math.max(1, found) : 0,
           JSON.stringify(nextPayload), message, job.id).run();
