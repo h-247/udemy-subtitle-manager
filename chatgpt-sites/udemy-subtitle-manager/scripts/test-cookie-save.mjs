@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
 import {readFileSync} from 'node:fs';
 import ts from 'typescript';
+import {z} from 'zod';
+globalThis.__testZod=z;
 
 const sql=new DatabaseSync(':memory:');
 for(const name of ['0000_fearless_gateway','0001_dark_toxin','0002_reliable_jobs']) sql.exec(readFileSync(new URL(`../drizzle/${name}.sql`,import.meta.url),'utf8'));
@@ -15,12 +17,12 @@ let statements=0,batches=0;
 const db={prepare(query){let args=[];return{bind(...values){args=values;return this;},async first(){statements++;return sql.prepare(query).get(...args)||null;},async all(){statements++;return{results:sql.prepare(query).all(...args)};},async run(){statements++;const r=sql.prepare(query).run(...args);return{meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};}};},async batch(queries){batches++;sql.exec('BEGIN');try{const r=[];for(const q of queries)r.push(await q.run());sql.exec('COMMIT');return r;}catch(e){sql.exec('ROLLBACK');throw e;}}};
 globalThis.__cookieEnv={DB:db,SECRET_KEY:'test-only-encryption-key-for-cookie-tests-123456789'};
 const source=readFileSync(new URL('../app/lib/api-worker.ts',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'');
-const js=ts.transpileModule('const env=globalThis.__cookieEnv;\n'+source+'\nexport {udemyRoutes,udemyValidation,saveUdemySession,parseCookieText,decrypt};',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
+const js=ts.transpileModule('const z=globalThis.__testZod; const env=globalThis.__cookieEnv; const getDb=()=>env.DB;\n'+source+'\nexport {udemyRoutes,udemyValidation,saveUdemySession,parseCookieText,decrypt};',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
 const worker=await import('data:text/javascript;base64,'+Buffer.from(js).toString('base64'));
 const cookieText=JSON.stringify([{domain:'.spouseworks.udemy.com',name:'session',value:'test-only-session'}]);
 const bundle=worker.parseCookieText(cookieText);
 await worker.saveUdemySession({id:1},bundle,{status:'CONNECTED',accountName:'Test',error:null});
-assert.equal(statements,3);assert.equal(batches,1,'1600 lectures save with one atomic batch of 3 statements');
+assert.equal(statements,4);assert.equal(batches,1,'1600 lectures save with one atomic batch of 4 statements');
 const saved=sql.prepare('SELECT * FROM udemy_sessions WHERE user_id=1').get();
 assert.ok(saved.encrypted_cookie_data.startsWith('v1.'));assert.equal(saved.encrypted_cookie_data.includes('test-only-session'),false);
 assert.equal(await worker.decrypt(saved.encrypted_cookie_data),bundle.text);
@@ -31,7 +33,7 @@ assert.equal(sql.prepare('SELECT url FROM lectures WHERE id=2000').get().url,'ht
 assert.equal(sql.prepare('SELECT url FROM lectures WHERE id=2001').get().url,'https://udemy.com.example.com/course/test/');
 const before=statements;
 await worker.saveUdemySession({id:1},bundle,{status:'ACCESS_DENIED',accountName:null,error:'Udemy denied access'});
-assert.equal(statements-before,3);assert.equal(sql.prepare('SELECT status FROM udemy_sessions WHERE user_id=1').get().status,'ACCESS_DENIED');
+assert.equal(statements-before,4);assert.equal(sql.prepare('SELECT status FROM udemy_sessions WHERE user_id=1').get().status,'ACCESS_DENIED');
 // Network/verification errors do not mean the cookie save failed.
 globalThis.fetch=async(_url,options)=>{assert.ok(options.signal);throw new DOMException('timeout','TimeoutError');};
 const validation=await worker.udemyValidation(bundle.jar,bundle.businessDomain);
@@ -48,4 +50,4 @@ const original=sql.prepare('SELECT encrypted_cookie_data FROM udemy_sessions WHE
 const batch=db.batch;db.batch=async(queries)=>{sql.exec('BEGIN');try{await queries[0].run();throw Error('Interrupted transaction');}finally{sql.exec('ROLLBACK');}};
 await assert.rejects(worker.saveUdemySession({id:1},bundle,{status:'CONNECTED',accountName:'Test',error:null}),/Interrupted/);db.batch=batch;
 assert.equal(sql.prepare('SELECT encrypted_cookie_data FROM udemy_sessions WHERE user_id=1').get().encrypted_cookie_data,original);
-console.log('PASS: 1600-lecture cookie save in 3 atomic statements, encrypted persistence, owner isolation, URL preservation, retained cookies on verification timeout/403, rollback on storage failure');
+console.log('PASS: 1600-lecture cookie save in 4 atomic statements, encrypted persistence, owner isolation, URL preservation, retained cookies on verification timeout/403, rollback on storage failure');

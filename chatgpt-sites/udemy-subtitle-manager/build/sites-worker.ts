@@ -27,8 +27,8 @@ export default {
     const response = await runWithConnectorBinding(binding, () => handler.fetch(request, env, ctx));
     const path = new URL(request.url).pathname;
     const identity = request.headers.get("oai-authenticated-user-id");
-    if (response.ok && identity && request.method === "POST" &&
-      (/^\/api\/(courses\/(import|\d+\/sync)|subtitles\/(process|lectures\/\d+\/process)|jobs\/(run|\d+\/retry))\/?$/.test(path))) {
+    if (response.ok && identity && ["POST","DELETE"].includes(request.method) &&
+      (request.method === "DELETE" || /^\/api\/(courses\/(import|\d+\/sync)|subtitles\/(process|lectures\/\d+\/process)|jobs\/(run|\d+\/retry)|udemy\/cookies)\/?$/.test(path))) {
       ctx.waitUntil(resumeUserJobs(identity).catch(() => console.error("Background job resume failed; durable checkpoint retained.")));
     }
     return response;

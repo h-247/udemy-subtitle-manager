@@ -3,12 +3,10 @@ import { existsSync, readFileSync } from "node:fs";
 import vinext from "vinext";
 import { defineConfig } from "vite";
 import hostingConfig from "./.openai/hosting.json";
+import localWorkerConfig from "./wrangler.local.json";
 import { readExecutionProfile } from "./scripts/execution-profile.mjs";
-import { sites } from "./build/sites-vite-plugin";
+import { sites } from "@openai/sites-vite-plugin";
 import { connectorPreview } from "./build/connector-preview-plugin.mjs";
-
-const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
-  "00000000-0000-4000-8000-000000000000";
 
 const { d1, r2 } = hostingConfig;
 
@@ -17,25 +15,9 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const managedLinux = readExecutionProfile() === "managed-linux";
 
 const localBindingConfig = {
-  main: "./build/sites-worker.ts",
-  compatibility_flags: ["nodejs_compat"],
-  d1_databases: d1
-    ? [
-        {
-          binding: d1,
-          database_name: "site-creator-d1",
-          database_id: SITE_CREATOR_PLACEHOLDER_DATABASE_ID,
-        },
-      ]
-    : [],
-  r2_buckets: r2
-    ? [
-        {
-          binding: r2,
-          bucket_name: "site-creator-r2",
-        },
-      ]
-    : [],
+  ...localWorkerConfig,
+  d1_databases: d1 ? localWorkerConfig.d1_databases : [],
+  r2_buckets: r2 ? localWorkerConfig.r2_buckets : [],
 };
 
 export default defineConfig(async ({ command }) => {
@@ -53,8 +35,11 @@ export default defineConfig(async ({ command }) => {
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
-  const provenance = new URL("./.openai/release.json", import.meta.url);
-  const releaseCommit = existsSync(provenance) ? JSON.parse(readFileSync(provenance,"utf8")).commit : execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim();
+  // Keep /api/health aligned with the source commit packaged for Sites.
+  const releaseCommit = existsSync(".openai/release.json")
+    ? JSON.parse(readFileSync(".openai/release.json", "utf8")).commit
+    : execFileSync("git", ["-C", existsSync("../../.git") ? "../.." : ".", "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  if (!/^[a-f0-9]{40}$/.test(releaseCommit)) throw new Error("Invalid release commit provenance");
   return {
     define: { __RELEASE_COMMIT__: JSON.stringify(releaseCommit) },
     server: {
@@ -67,11 +52,14 @@ export default defineConfig(async ({ command }) => {
     },
     plugins: [
       vinext(),
-      sites({ mockAuth: !managedLinux }),
+      sites(),
       connectorPreview(),
       cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         inspectorPort: false,
+        persistState: {
+          path: process.env.SITES_LOCAL_STATE_PATH || ".wrangler/state",
+        },
         config: {
           ...localBindingConfig,
           ...(command === "serve"

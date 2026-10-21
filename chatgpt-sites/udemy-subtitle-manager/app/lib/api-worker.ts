@@ -2,7 +2,10 @@ import { releaseCommit } from "./release";
 import { normalizeCourseTags } from "./course-tags";
 import { loadCourseRows } from "./course-reader";
 import { env } from "cloudflare:workers";
+import { getDb, type SitesDatabase } from "../../db";
 import { getChatGPTUser } from "../chatgpt-auth";
+import { courseImportSchema, lectureUpdateSchema, requestObjectSchema, subtitleProcessSchema } from "./api-validation";
+import { z } from "zod";
 
 type Row = Record<string, any>;
 type UserRow = { created_at?: string; id: number; email: string; platform_user_id: string; is_active: number; drive_credentials: string | null };
@@ -12,10 +15,7 @@ type Caption = Record<string, any>;
 const UDEMY_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 const now = () => new Date().toISOString();
-const db = () => {
-  if (!env.DB) throw new Error("The Sites D1 database is not configured.");
-  return env.DB;
-};
+const db = () => getDb();
 const bucket = () => {
   if (!env.BUCKET) throw new Error("The Sites R2 bucket is not configured.");
   return env.BUCKET;
@@ -29,8 +29,26 @@ function fail(detail: string, status = 400) {
 }
 
 async function bodyJson(request: Request): Promise<Row> {
-  try { return await request.json() as Row; } catch { throw new ApiError(400, "Request body must be valid JSON."); }
+  let payload: unknown;
+  try { payload = await request.json(); } catch { throw new ApiError(400, "Request body must be valid JSON."); }
+  const parsed = requestObjectSchema.safeParse(payload);
+  if (!parsed.success) throw new ApiError(400, "Request body must be a JSON object.");
+  return parsed.data;
 }
+
+function validatePayload<T extends z.ZodType>(payload: Row, schema: T): z.output<T> {
+  const parsed = schema.safeParse(payload);
+  if (!parsed.success) {
+    const details = parsed.error.issues.map((issue) => {
+      const field = issue.path.length ? `${issue.path.join(".")}: ` : "";
+      return `${field}${issue.message}`;
+    });
+    throw new ApiError(400, details.join(" "));
+  }
+  return parsed.data;
+}
+
+class SessionRequired extends Error {}
 
 class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -46,6 +64,7 @@ async function currentUser(): Promise<UserRow> {
   const user = await database.prepare("SELECT * FROM users WHERE platform_user_id=? AND is_active=1")
     .bind(identity.userId).first<UserRow>();
   if (!user) throw new ApiError(401, "Your ChatGPT account is not active for this Site.");
+  await normalizeDriveCredentials(user);
   return user;
 }
 
@@ -144,7 +163,7 @@ async function encrypt(value: string) {
 
 async function decrypt(value: string) {
   const secret = (env as any).SECRET_KEY as string | undefined;
-  if (!secret || secret.length < 32 || !value.startsWith("v1.")) throw new Error("Stored Udemy cookies could not be decrypted.");
+  if (!secret || secret.length < 32 || !value.startsWith("v1.")) throw new Error("Stored credentials could not be decrypted.");
   const [, ivPart, ciphertext] = value.split(".");
   const material = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
   const key = await crypto.subtle.importKey("raw", material, "AES-GCM", false, ["decrypt"]);
@@ -233,7 +252,7 @@ function replaceUdemyDomain(value: string, newDomain: string) {
   } catch { return value; }
 }
 
-function udemyDomainUpdates(database: D1Database, userId: number, domain: string) {
+function udemyDomainUpdates(database: SitesDatabase, userId: number, domain: string) {
   if (!isUdemyDomain(domain)) throw new ApiError(400,"Invalid Udemy domain.");
   // Only replace the URL authority; preserve lecture paths and query strings.
   // Scope both updates to the signed-in owner and skip unrelated/existing URLs.
@@ -256,6 +275,7 @@ async function saveUdemySession(user: UserRow, bundle: CookieBundle, validation:
       account_name=excluded.account_name,business_domain=excluded.business_domain,error_message=excluded.error_message,last_validated_at=excluded.last_validated_at,updated_at=CURRENT_TIMESTAMP`)
       .bind(user.id, encrypted, validation.status, validation.accountName, bundle.businessDomain, validation.error, now()),
     ...udemyDomainUpdates(database,user.id,bundle.businessDomain || "www.udemy.com"),
+    database.prepare("UPDATE processing_jobs SET status='PENDING',attempts=0,retry_at=NULL,error_message=NULL,progress_message='Udemy cookies saved. Resuming from saved lecture.' WHERE user_id=? AND status='WAITING_SESSION'").bind(user.id),
   ]);
 }
 
@@ -289,7 +309,7 @@ async function udemyRoutes(request: Request, user: UserRow, path: string[], _url
         .bind(validation.status, validation.accountName, validation.error, now(), user.id).run();
     } catch {
       await database.prepare("UPDATE udemy_sessions SET status='INVALID_COOKIES',error_message=?,last_validated_at=?,updated_at=CURRENT_TIMESTAMP WHERE user_id=?")
-        .bind("Stored Udemy cookies could not be decrypted.", now(), user.id).run();
+        .bind("Stored credentials could not be decrypted.", now(), user.id).run();
     }
     return json(udemyStatus(await getUdemySession(user.id)));
   }
@@ -347,15 +367,29 @@ async function driveCallback(request: Request, url: URL) {
   const user = await database.prepare("SELECT * FROM users WHERE id=?").bind(savedState.user_id).first<UserRow>();
   if (!user) return Response.redirect(new URL("/dashboard", url.origin), 302);
   const credentials = { access_token: token.access_token, refresh_token: token.refresh_token, expires_at: Date.now() + Number(token.expires_in || 3600) * 1000, scope: token.scope, token_type: token.token_type };
-  await database.prepare("UPDATE users SET drive_credentials=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(JSON.stringify(credentials), user.id).run();
+  await database.prepare("UPDATE users SET drive_credentials=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(await encrypt(JSON.stringify(credentials)), user.id).run();
   return Response.redirect(new URL("/dashboard?drive_connected=true", url.origin), 302);
 }
 
 async function courseRoutes(request: Request, user: UserRow, path: string[], url: URL) {
   const database = db();
+  if (path.length === 1 && path[0] === "tags" && request.method === "GET") {
+    const rows = await database.prepare("SELECT tags_json FROM courses WHERE user_id=?").bind(user.id).all<Row>();
+    const tags = new Map<string,string>();
+    for (const row of rows.results) {
+      let values: unknown;
+      try { values = JSON.parse(row.tags_json || "[]"); } catch { continue; }
+      if (!Array.isArray(values)) continue;
+      for (const tag of values) if (typeof tag === "string" && tag.trim()) {
+        const normalized = tag.normalize("NFKC").trim().replace(/\s+/g," ");
+        if (normalized) tags.set(normalized.toLowerCase(),normalized);
+      }
+    }
+    return json([...tags.values()].sort((a,b)=>a.localeCompare(b)));
+  }
   if (path.length === 1 && path[0] === "import" && request.method === "POST") {
-    const payload = await bodyJson(request);
-    const normalized = validUdemyUrl(String(payload.url || ""));
+    const payload = validatePayload(await bodyJson(request), courseImportSchema);
+    const normalized = validUdemyUrl(payload.url);
     let tags: string[];
     try { tags = normalizeCourseTags(payload.tags ?? []); }
     catch (error) { throw new ApiError(400, error instanceof Error ? error.message : "Invalid tags."); }
@@ -377,7 +411,7 @@ async function courseRoutes(request: Request, user: UserRow, path: string[], url
   if (path[0] === "lectures" && path.length === 2 && request.method === "PATCH") {
     const lectureId = Number(path[1]);
     const lecture = await ownedLecture(user.id, lectureId);
-    const payload = await bodyJson(request);
+    const payload = validatePayload(await bodyJson(request), lectureUpdateSchema);
     const fields: string[] = [], values: any[] = [];
     if (payload.learning_status !== undefined && payload.learning_status !== null) {
       const raw = String(payload.learning_status).trim().toUpperCase();
@@ -427,19 +461,8 @@ async function courseRoutes(request: Request, user: UserRow, path: string[], url
   if (path.length === 1 && request.method === "GET") return json(await courseRead(await ownedCourse(user.id, id), true));
   if (path.length === 1 && request.method === "DELETE") {
     const course = await ownedCourse(user.id, id);
-    const credentials = await normalizeDriveCredentials(user);
-    if (credentials) {
-      const subs = await database.prepare(`SELECT sub.drive_file_id,sub.storage_key FROM subtitles sub JOIN lectures l ON l.id=sub.lecture_id JOIN sections s ON s.id=l.section_id WHERE s.course_id=?`).bind(id).all<Row>();
-      for (const sub of subs.results) {
-        if (sub.drive_file_id) await deleteDriveFile(user, credentials, sub.drive_file_id).catch(() => undefined);
-        if (sub.storage_key) await bucket().delete(sub.storage_key).catch(() => undefined);
-      }
-    } else {
-      const subs = await database.prepare(`SELECT sub.storage_key FROM subtitles sub JOIN lectures l ON l.id=sub.lecture_id JOIN sections s ON s.id=l.section_id WHERE s.course_id=?`).bind(id).all<Row>();
-      for (const sub of subs.results) if (sub.storage_key) await bucket().delete(sub.storage_key).catch(() => undefined);
-    }
-    await database.prepare("DELETE FROM courses WHERE id=? AND user_id=?").bind(id, user.id).run();
-    return json({ message: `Course '${course.title}' and associated subtitles deleted successfully.` });
+    await ensureJob(user.id,"CLEANUP",null,{scope:"course",target_id:id},1);
+    return json({message:`Deletion queued for '${course.title}'. Cleanup progress is retained until all files are removed.`},202);
   }
   return fail("Not found.", 404);
 }
@@ -447,11 +470,11 @@ async function courseRoutes(request: Request, user: UserRow, path: string[], url
 async function subtitleRoutes(request: Request, user: UserRow, path: string[], _url: URL) {
   const database = db();
   if (path[0] === "process" && path.length === 1 && request.method === "POST") {
-    const payload = await bodyJson(request);
+    const payload = validatePayload(await bodyJson(request), subtitleProcessSchema);
     const language = String(payload.language || "en");
     let rows: Row[] = [];
-    if (Array.isArray(payload.lecture_ids) && payload.lecture_ids.length) {
-      const ids = payload.lecture_ids.map(Number).filter((id: number) => Number.isInteger(id) && id > 0).slice(0, 250);
+    if (payload.lecture_ids?.length) {
+      const ids = payload.lecture_ids;
       if (!ids.length) throw new ApiError(400, "No eligible video lectures found to process.");
       const marks = ids.map(() => "?").join(",");
       rows = (await database.prepare(`SELECT l.id FROM lectures l JOIN sections s ON s.id=l.section_id JOIN courses c ON c.id=s.course_id WHERE l.id IN (${marks}) AND c.user_id=? AND l.lecture_type='video'`).bind(...ids, user.id).all<Row>()).results;
@@ -499,24 +522,15 @@ async function subtitleRoutes(request: Request, user: UserRow, path: string[], _
   if (path[0] === "lectures" && path.length === 2 && request.method === "DELETE") {
     const lectureId = Number(path[1]);
     await ownedLecture(user.id, lectureId);
-    const subs = await database.prepare("SELECT * FROM subtitles WHERE lecture_id=?").bind(lectureId).all<Row>();
-    const credentials = await normalizeDriveCredentials(user);
-    for (const sub of subs.results) {
-      if (sub.drive_file_id && credentials) await deleteDriveFile(user, credentials, sub.drive_file_id).catch(() => undefined);
-      if (sub.storage_key) await bucket().delete(sub.storage_key).catch(() => undefined);
-    }
-    await database.prepare("DELETE FROM subtitles WHERE lecture_id=?").bind(lectureId).run();
-    return json({ message: "Subtitles deleted successfully for lecture.", lecture_id: lectureId });
+    await ensureJob(user.id,"CLEANUP",null,{scope:"lecture",target_id:lectureId},1);
+    return json({message:"Subtitle deletion queued.",lecture_id:lectureId},202);
   }
   const id = Number(path[0]);
   if (Number.isInteger(id) && id > 0 && path.length === 1 && request.method === "DELETE") {
     const subtitle = await database.prepare(`SELECT sub.* FROM subtitles sub JOIN lectures l ON l.id=sub.lecture_id JOIN sections s ON s.id=l.section_id JOIN courses c ON c.id=s.course_id WHERE sub.id=? AND c.user_id=?`).bind(id, user.id).first<Row>();
     if (!subtitle) throw new ApiError(404, "Subtitle not found.");
-    const credentials = await normalizeDriveCredentials(user);
-    if (subtitle.drive_file_id && credentials) await deleteDriveFile(user, credentials, subtitle.drive_file_id).catch(() => undefined);
-    if (subtitle.storage_key) await bucket().delete(subtitle.storage_key).catch(() => undefined);
-    await database.prepare("DELETE FROM subtitles WHERE id=?").bind(id).run();
-    return json({ message: "Subtitle deleted successfully.", id });
+    await ensureJob(user.id,"CLEANUP",null,{scope:"subtitle",target_id:id},1);
+    return json({message:"Subtitle deletion queued.",id},202);
   }
   if (Number.isInteger(id) && id > 0 && path[1] === "content" && request.method === "GET") {
     const subtitle = await database.prepare(`SELECT sub.* FROM subtitles sub JOIN lectures l ON l.id=sub.lecture_id JOIN sections s ON s.id=l.section_id JOIN courses c ON c.id=s.course_id WHERE sub.id=? AND c.user_id=?`).bind(id, user.id).first<Row>();
@@ -536,7 +550,7 @@ async function jobRoutes(request: Request, user: UserRow, path: string[], url: U
     const courseId = Number(url.searchParams.get("course_id") || 0);
     const limit = safeInt(url.searchParams.get("limit"), 10, 1, 50);
     const rows = courseId
-      ? await database.prepare("SELECT * FROM processing_jobs WHERE user_id=? AND course_id=? ORDER BY created_at DESC,id DESC LIMIT ?").bind(user.id, courseId, limit).all<Row>()
+      ? await database.prepare("SELECT * FROM processing_jobs WHERE user_id=? AND (course_id=? OR job_type='CLEANUP') ORDER BY created_at DESC,id DESC LIMIT ?").bind(user.id, courseId, limit).all<Row>()
       : await database.prepare("SELECT * FROM processing_jobs WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT ?").bind(user.id, limit).all<Row>();
     return json(rows.results.map(jobRead));
   }
@@ -554,6 +568,7 @@ async function jobRoutes(request: Request, user: UserRow, path: string[], url: U
     return json(jobRead((await database.prepare("SELECT * FROM processing_jobs WHERE id=?").bind(id).first<Row>())!));
   }
   if (path.length === 2 && path[1] === "cancel" && request.method === "POST") {
+    if (job.job_type === "CLEANUP") throw new ApiError(409,"File cleanup must finish and cannot be cancelled.");
     if (!["COMPLETED", "FAILED", "CANCELLED"].includes(job.status)) {
       await database.prepare("UPDATE processing_jobs SET status='CANCELLED',progress_message='Cancellation requested.',updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?")
         .bind(id, user.id).run();
@@ -564,7 +579,13 @@ async function jobRoutes(request: Request, user: UserRow, path: string[], url: U
   return fail("Not found.", 404);
 }
 
+async function assertNoCleanup(userId: number) {
+  const cleanup = await db().prepare("SELECT id FROM processing_jobs WHERE user_id=? AND job_type='CLEANUP' AND status!='COMPLETED' LIMIT 1").bind(userId).first<Row>();
+  if (cleanup) throw new ApiError(409,"File deletion is pending. Wait for cleanup to finish before starting new processing or imports.");
+}
+
 async function ensureJob(userId: number, jobType: string, courseId: number | null, payload: Row, totalItems: number) {
+  if (jobType !== "CLEANUP") await assertNoCleanup(userId);
   const result = await db().prepare(`INSERT INTO processing_jobs (user_id,course_id,job_type,status,total_items,payload_json,progress_message)
     VALUES (?,?,?,'PENDING',?,?,?)`).bind(userId, courseId, jobType, totalItems, JSON.stringify(payload), "Queued for processing.").run();
   const id = Number(result.meta.last_row_id);
@@ -656,7 +677,20 @@ async function ownedLecture(userId: number, id: number) {
 
 async function normalizeDriveCredentials(user: UserRow) {
   if (!user.drive_credentials) return null;
-  try { return JSON.parse(user.drive_credentials) as Row; } catch { return null; }
+  const stored = user.drive_credentials;
+  const credentials = JSON.parse(stored.startsWith("v1.") ? await decrypt(stored) : stored) as Row;
+  if (!stored.startsWith("v1.")) {
+    const encrypted = await encrypt(JSON.stringify(credentials));
+    await db().prepare("UPDATE users SET drive_credentials=? WHERE id=? AND drive_credentials=?").bind(encrypted,user.id,stored).run();
+    user.drive_credentials = encrypted;
+  }
+  return credentials;
+}
+
+// Bounded migration also covers dormant connections when the dispatcher runs.
+async function migrateDriveCredentials() {
+  const rows = await db().prepare("SELECT * FROM users WHERE drive_credentials IS NOT NULL AND drive_credentials NOT LIKE 'v1.%' LIMIT 25").all<UserRow>();
+  for (const user of rows.results) await normalizeDriveCredentials(user);
 }
 
 function driveConfig(requestUrl?: string) {
@@ -678,8 +712,9 @@ async function driveAccessToken(user: UserRow, credentials: Row) {
   const response = await fetch("https://oauth2.googleapis.com/token", { method: "POST", signal: AbortSignal.timeout(12000), headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
   const data = await response.json() as Row;
   if (!response.ok || !data.access_token) throw new ApiError(401, "Google Drive token refresh failed. Reconnect Drive.");
-  const next = { ...credentials, access_token: data.access_token, expires_at: Date.now() + Number(data.expires_in || 3600) * 1000 };
-  await db().prepare("UPDATE users SET drive_credentials=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(JSON.stringify(next), user.id).run();
+  const next = { ...credentials, refresh_token: data.refresh_token || credentials.refresh_token, access_token: data.access_token, expires_at: Date.now() + Number(data.expires_in || 3600) * 1000 };
+  await db().prepare("UPDATE users SET drive_credentials=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(await encrypt(JSON.stringify(next)), user.id).run();
+  credentials.refresh_token = next.refresh_token;
   credentials.access_token = next.access_token;
   credentials.expires_at = next.expires_at;
   return next.access_token as string;
@@ -747,7 +782,7 @@ async function driveUpload(user: UserRow, credentials: Row, name: string, conten
 
 async function deleteDriveFile(user: UserRow, credentials: Row, fileId: string) {
   const token = await driveAccessToken(user, credentials);
-  const response = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, { method: "DELETE", signal: AbortSignal.timeout(12000), headers: { Authorization: `Bearer ${token}` } });
   if (!response.ok && response.status !== 404) throw new ApiError(response.status, `Google Drive returned HTTP ${response.status}.`);
 }
 
@@ -792,19 +827,26 @@ async function subtitleContent(lecture: Row, language: string, cookies: CookieBu
   let captions: Caption[] = [];
   try { captions = JSON.parse(lecture.captions_json || "[]") as Caption[]; } catch { /* Refresh malformed cache. */ }
   const refresh = async () => {
-    if (!cookies) throw new Error("Caption link expired. Reconnect your Udemy session to refresh subtitle links.");
+    if (!cookies) throw new SessionRequired("Caption link expired. Reconnect your Udemy session to refresh subtitle links.");
     if (!lecture.udemy_course_id) throw new Error("Udemy course ID is missing. Re-sync the course curriculum.");
     const host = new URL(lecture.course_url).hostname;
     const url = new URL(`https://${host}/api-2.0/users/me/subscribed-courses/${encodeURIComponent(lecture.udemy_course_id)}/lectures/${encodeURIComponent(lecture.lecture_id)}/`);
     url.searchParams.set("fields[lecture]", "title,asset,transcript"); url.searchParams.set("fields[asset]", "@all");
     const response = await udemyFetch(url.toString(), cookies.jar);
+    if ([401,403].includes(response.status)) throw new SessionRequired(`Udemy lecture refresh returned HTTP ${response.status}. Reconnect Udemy.`);
     if (!response.ok) throw new Error(`Udemy lecture refresh returned HTTP ${response.status}. ${[401,403].includes(response.status) ? "Refresh your Udemy session cookies and confirm course access." : "Please retry later."}`);
     const data = await response.json() as Row;
     captions = data.asset?.captions || data.asset?.subtitles || [];
     await db().prepare("UPDATE lectures SET captions_json=? WHERE id=?").bind(JSON.stringify(captions), lecture.id).run();
   };
   let refreshed = false;
-  if (!chooseCaption(captions,language).caption && cookies) { await refresh(); refreshed = true; }
+  if (!chooseCaption(captions,language).caption) {
+    if (!cookies) {
+      return { error: "Udemy session is unavailable, so subtitle tracks could not be checked. Reconnect Udemy and retry.", category: "SESSION_REQUIRED" };
+    }
+    await refresh();
+    refreshed = true;
+  }
   for (;;) {
     const selected = chooseCaption(captions, language);
     const captionUrl = selected.caption?.url || selected.caption?.download_url;
@@ -842,12 +884,13 @@ async function processSubtitle(user: UserRow, lecture: Row, language: string) {
   } else {
     let result: Row;
     try { result = await subtitleContent(lecture, language, cookies); }
-    catch (error) { result = {error: error instanceof Error ? error.message : "Caption download failed", category: "PROCESSING_ERROR"}; }
+    catch (error) { if (error instanceof SessionRequired) throw error; result = {error: error instanceof Error ? error.message : "Caption download failed", category: "PROCESSING_ERROR"}; }
     if (!result.content) {
+      if (result.category === "SESSION_REQUIRED") throw new SessionRequired(result.error);
       await database.prepare(`INSERT INTO subtitles (lecture_id,language,subtitle_type,status,error_category,error_message,last_processed_at)
         VALUES (?,?,'NONE',?,?,?,?) ON CONFLICT(lecture_id,language) DO UPDATE SET status=excluded.status,error_category=excluded.error_category,error_message=excluded.error_message,last_processed_at=excluded.last_processed_at`)
         .bind(lecture.id, language, result.category === "NO_SUBTITLES" ? "NO_SUBTITLES" : "FAILED", result.category, result.error, now()).run();
-      if (result.category !== "NO_SUBTITLES") throw new Error(result.error);
+      if (result.category !== "NO_SUBTITLES" && result.category !== "SESSION_REQUIRED") throw new Error(result.error);
       return false;
     }
     content = result.content;
@@ -869,11 +912,15 @@ async function processSubtitle(user: UserRow, lecture: Row, language: string) {
 }
 
 async function retryJob(job: Row, error: unknown) {
+  if (error instanceof SessionRequired) {
+    await db().prepare("UPDATE processing_jobs SET status='WAITING_SESSION',retry_at=NULL,error_message=?,progress_message='Reconnect Udemy to resume this lecture.',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status!='CANCELLED'").bind(error.message,job.id).run();
+    return;
+  }
   const attempt = Number(job.attempts || 0) + 1;
   const detail = error instanceof Error ? error.message : "Processing failed";
   await db().prepare(`UPDATE processing_jobs SET status=?,attempts=?,retry_at=unixepoch()+?,error_message=?,progress_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status!='CANCELLED'`)
-    .bind(attempt >= 8 ? "FAILED" : "PENDING", attempt, Math.min(3600, 15 * 2 ** attempt), detail,
-      attempt >= 8 ? "Retries exhausted. Retry this job after correcting the error." : `Retry ${attempt}/8 queued; progress saved.`, job.id).run();
+    .bind(attempt >= 8 && job.job_type !== "CLEANUP" ? "FAILED" : "PENDING", attempt, Math.min(3600, 15 * 2 ** attempt), detail,
+      attempt >= 8 && job.job_type !== "CLEANUP" ? "Retries exhausted. Retry this job after correcting the error." : `Retry ${attempt}${job.job_type === "CLEANUP" ? "" : "/8"} queued; progress saved.`, job.id).run();
 }
 
 // Invoked using the trusted Sites identity after a successful enqueue/resume POST.
@@ -902,9 +949,13 @@ async function advanceJob(userId: number) {
   const database = db();
   const job = await database.prepare(`SELECT * FROM processing_jobs WHERE user_id=? AND (
     (status IN ('PENDING','PROCESSING') AND (retry_at IS NULL OR retry_at <= unixepoch()))
-  ) ORDER BY created_at,id LIMIT 1`).bind(userId).first<Row>();
+  ) ORDER BY CASE WHEN job_type='CLEANUP' THEN 0 ELSE 1 END,created_at,id LIMIT 1`).bind(userId).first<Row>();
   if (!job) return;
   const payload = JSON.parse(job.payload_json || "{}");
+  if (job.job_type === "CLEANUP") {
+    try { await cleanupStep(job,payload); } catch (error) { await retryJob(job,error); }
+    return;
+  }
   if (job.job_type === "COURSE_IMPORT") {
     await importCourseStep(job, payload);
     return;
@@ -933,6 +984,56 @@ async function advanceJob(userId: number) {
   await database.prepare(`UPDATE processing_jobs SET completed_items=completed_items+?,failed_items=failed_items+?,payload_json=?,status=CASE WHEN status='CANCELLED' THEN status ELSE ? END,progress_message=?,attempts=0,retry_at=NULL,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
     .bind(succeeded ? 1 : 0, succeeded ? 0 : 1, JSON.stringify({ ...payload, cursor: next }), finished ? "COMPLETED" : "PENDING",
       finished ? `Batch completed: ${Number(job.completed_items) + Number(succeeded)} succeeded, ${Number(job.failed_items) + Number(!succeeded)} failed or had no subtitles.` : `Processing (${next}/${ids.length}): ${lecture?.title || "lecture"}`, job.id).run();
+}
+
+// Cleanup executes under the same per-user lease as downloads and imports.
+async function cleanupStep(job: Row, payload: Row) {
+  const database = db();
+  if (!payload.files) {
+    const selector = payload.scope === "course" ? "c.id" : payload.scope === "lecture" ? "l.id" : "sub.id";
+    const rows = await database.prepare(`SELECT sub.*,l.id AS target_lecture_id,c.id AS target_course_id FROM subtitles sub
+      JOIN lectures l ON l.id=sub.lecture_id JOIN sections s ON s.id=l.section_id JOIN courses c ON c.id=s.course_id
+      WHERE ${selector}=? AND c.user_id=?`).bind(payload.target_id,job.user_id).all<Row>();
+    const lectureRows = payload.scope === "course"
+      ? await database.prepare("SELECT l.id FROM lectures l JOIN sections s ON s.id=l.section_id JOIN courses c ON c.id=s.course_id WHERE c.id=? AND c.user_id=?").bind(payload.target_id,job.user_id).all<Row>()
+      : {results: payload.scope === "lecture" ? [{id:payload.target_id}] : rows.results.map(r=>({id:r.target_lecture_id}))};
+    const ids = lectureRows.results.map(r=>Number(r.id));
+    const deletingCourse = payload.scope === "course" ? await database.prepare("SELECT url FROM courses WHERE id=? AND user_id=?").bind(payload.target_id,job.user_id).first<Row>() : null;
+    const next = {...payload,files:rows.results.map(r=>({drive_file_id:r.drive_file_id,storage_key:r.storage_key})),cursor:0};
+    const jobs = await database.prepare("SELECT * FROM processing_jobs WHERE user_id=? AND job_type IN ('SUBTITLE_BATCH','COURSE_IMPORT') AND status NOT IN ('COMPLETED','CANCELLED')").bind(job.user_id).all<Row>();
+    const cancel = jobs.results.filter(r=>{
+      const p=JSON.parse(r.payload_json || "{}");
+      return (deletingCourse && r.job_type === "COURSE_IMPORT" && p.url && validUdemyUrl(p.url).slug === validUdemyUrl(deletingCourse.url).slug) || (payload.scope === "course" && (Number(r.course_id)===Number(payload.target_id) || Number(p.local_course_id)===Number(payload.target_id))) || (p.lecture_ids || []).some((id:number)=>ids.includes(id));
+    }).map(r=>database.prepare("UPDATE processing_jobs SET status='CANCELLED',progress_message='Cancelled for deletion.' WHERE id=?").bind(r.id));
+    const remove = payload.scope === "course"
+      ? database.prepare("DELETE FROM courses WHERE id=? AND user_id=?").bind(payload.target_id,job.user_id)
+      : payload.scope === "lecture"
+        ? database.prepare("DELETE FROM subtitles WHERE lecture_id=? AND lecture_id IN (SELECT l.id FROM lectures l JOIN sections s ON s.id=l.section_id JOIN courses c ON c.id=s.course_id WHERE c.user_id=?)").bind(payload.target_id,job.user_id)
+        : database.prepare("DELETE FROM subtitles WHERE id=? AND id IN (SELECT sub.id FROM subtitles sub JOIN lectures l ON l.id=sub.lecture_id JOIN sections s ON s.id=l.section_id JOIN courses c ON c.id=s.course_id WHERE c.user_id=?)").bind(payload.target_id,job.user_id);
+    await database.batch([database.prepare("UPDATE processing_jobs SET payload_json=?,total_items=? WHERE id=?").bind(JSON.stringify(next),next.files.length,job.id),...cancel,remove]);
+    return;
+  }
+  const cursor = Number(payload.cursor || 0);
+  const file = payload.files[cursor];
+  if (file) {
+    // R2 cleanup can proceed even when Drive requires reconnection.
+    if (file.storage_key) await withTimeout(bucket().delete(file.storage_key));
+    if (file.drive_file_id) {
+      const user = await database.prepare("SELECT * FROM users WHERE id=?").bind(job.user_id).first<UserRow>();
+      const credentials = user && await normalizeDriveCredentials(user);
+      if (!user || !credentials) throw new Error("Reconnect Google Drive to finish queued deletion.");
+      await deleteDriveFile(user,credentials,file.drive_file_id);
+    }
+  }
+  const done = !file || cursor+1 >= payload.files.length;
+  await database.prepare("UPDATE processing_jobs SET payload_json=?,completed_items=?,status=?,attempts=0,retry_at=NULL,error_message=NULL,progress_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+    .bind(JSON.stringify({...payload,cursor:cursor+1}),Math.min(cursor+1,payload.files.length),done?"COMPLETED":"PENDING",done?"Deletion completed.":"Removing saved files.",job.id).run();
+}
+
+async function withTimeout<T>(operation: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  try { return await Promise.race([operation,new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error("Storage cleanup timed out.")),12000);})]); }
+  finally { clearTimeout(timer!); }
 }
 
 async function apiUserProfile(user: UserRow) {
@@ -1122,6 +1223,7 @@ async function api(request: Request) {
   if (path.join("/") === "internal/jobs/run" && method === "POST") {
     const secret = (env as any).JOB_RUNNER_SECRET;
     if (!secret || request.headers.get("Authorization") !== `Bearer ${secret}`) return fail("Unauthorized",401);
+    await migrateDriveCredentials();
     const users = await db().prepare("SELECT DISTINCT user_id FROM processing_jobs WHERE status IN ('PENDING','PROCESSING') AND (retry_at IS NULL OR retry_at <= unixepoch()) ORDER BY updated_at LIMIT 8").all<Row>();
     let advanced = 0;
     for (const row of users.results) if (await processPendingJob(Number(row.user_id))) advanced++;
@@ -1134,7 +1236,17 @@ async function api(request: Request) {
   if (path[0] === "udemy") return udemyRoutes(request, user, path.slice(1), url);
   if (path[0] === "drive") return driveRoutes(request, user, path.slice(1), url);
   if (path[0] === "courses") return courseRoutes(request, user, path.slice(1), url);
-  if (path[0] === "subtitles") return subtitleRoutes(request, user, path.slice(1), url);
+  if (path[0] === "subtitles") {
+    if (method === "POST" && path[3] === "upload") {
+      const token=crypto.randomUUID();
+      const claim=await db().prepare(`INSERT INTO job_leases(user_id,token,expires_at) VALUES (?,?,unixepoch()+600)
+        ON CONFLICT(user_id) DO UPDATE SET token=excluded.token,expires_at=excluded.expires_at WHERE job_leases.expires_at<unixepoch()`).bind(user.id,token).run();
+      if (!claim.meta.changes) throw new ApiError(409,"Processing is active. Retry subtitle import shortly.");
+      try { await assertNoCleanup(user.id); return await subtitleRoutes(request,user,path.slice(1),url); }
+      finally { await db().prepare("DELETE FROM job_leases WHERE user_id=? AND token=?").bind(user.id,token).run(); }
+    }
+    return subtitleRoutes(request,user,path.slice(1),url);
+  }
   if (path[0] === "jobs") return jobRoutes(request, user, path.slice(1), url);
   return fail("Not found.", 404);
 }

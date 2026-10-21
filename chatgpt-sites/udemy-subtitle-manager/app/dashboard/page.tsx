@@ -36,6 +36,7 @@ function CoursesListContent() {
 
   // Courses state
   const [courses, setCourses] = useState<Course[]>([]);
+  const [existingCourseTags, setExistingCourseTags] = useState<string[]>([]);
   const courseRequestInFlight = useRef(false);
   const [coursesError, setCoursesError] = useState<string | null>(null);
   const [coursesLoading, setCoursesLoading] = useState(true);
@@ -96,8 +97,9 @@ function CoursesListContent() {
     if (!silent) setCoursesLoading(true);
     setCoursesError(null);
     try {
-      const data = await api.courses.list();
+      const [data, existingTags] = await Promise.all([api.courses.list(), api.courses.tags()]);
       setCourses(data.items);
+      setExistingCourseTags(existingTags);
     } catch (err) {
       setCoursesError(err instanceof Error ? err.message : "Failed to load courses.");
     } finally {
@@ -156,7 +158,7 @@ function CoursesListContent() {
     }
   };
 
-  const tagOptions = [...new Map(courses.flatMap((course) => course.tags.map((tag) => [tag.toLowerCase(), tag] as const))).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  const tagOptions = existingCourseTags;
   const filteredCourses = courses.filter((c) => {
     if (tagFilter === "untagged" && c.tags.length) return false;
     if (tagFilter.startsWith("tag:") && !c.tags.some((tag) => tag.toLowerCase() === tagFilter.slice(4))) return false;
@@ -200,7 +202,7 @@ function CoursesListContent() {
         )}
 
         {/* Active background jobs bar */}
-        <JobProgressBar jobs={jobs} onCancelJob={handleCancelJob} />
+        <JobProgressBar jobs={jobs} onCancelJob={handleCancelJob} onReconnect={() => setIsConnectionsOpen(true)} />
 
         <div className="flex flex-wrap items-center justify-between gap-3">
           {courses.length > 0 && <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -208,8 +210,8 @@ function CoursesListContent() {
             <select id="filter-course-tags" value={tagFilter} onChange={(event) => setTagFilter(event.target.value)} className="px-3 py-2 rounded-full bg-[#262626] border border-[#383838]">
               <option value="all">All tags</option>
               <option value="untagged">Untagged</option>
-              {tagFilter.startsWith("tag:") && !tagOptions.some(([key]) => `tag:${key}` === tagFilter) && <option value={tagFilter}>{tagFilter.slice(4)}</option>}
-              {tagOptions.map(([key, tag]) => <option key={key} value={`tag:${key}`}>{tag}</option>)}
+              {tagFilter.startsWith("tag:") && !tagOptions.some((tag) => `tag:${tag.toLowerCase()}` === tagFilter) && <option value={tagFilter}>{tagFilter.slice(4)}</option>}
+              {tagOptions.map((tag) => <option key={tag.toLowerCase()} value={`tag:${tag.toLowerCase()}`}>{tag}</option>)}
             </select>
             {(tagFilter !== "all" || courseSearch) && <button onClick={() => { setTagFilter("all"); setCourseSearch(""); }} className="underline text-[#A3A3A3] hover:text-white">Clear filters</button>}
           </div>}
@@ -387,10 +389,11 @@ function CoursesListContent() {
       <ConnectionPanel
         isOpen={isConnectionsOpen}
         onClose={() => setIsConnectionsOpen(false)}
-        onStatusChange={() => refreshUser()}
+        onStatusChange={() => { void refreshUser(); void loadJobs(); }}
       />
 
       <CourseImportModal
+        existingTags={tagOptions}
         isOpen={isImportOpen}
         onClose={() => setIsImportOpen(false)}
         onSuccess={(msg, job) => {
@@ -406,7 +409,8 @@ function CoursesListContent() {
         isOpen={!!deletingCourse}
         onClose={() => setDeletingCourse(null)}
         onDeleted={() => {
-          setToastMessage("Course deleted successfully.");
+          setToastMessage("Course deletion queued. Cleanup will retry until all files are removed.");
+          void loadJobs();
           loadCourses();
         }}
       />

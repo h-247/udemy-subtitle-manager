@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
+import { z } from "zod";
 import { loadCourseRows } from "../app/lib/course-reader.ts";
+globalThis.__testZod = z;
 
 const sqlite = new DatabaseSync(":memory:");
 sqlite.exec(`CREATE TABLE sections (id INTEGER,course_id INTEGER,title TEXT,position INTEGER);
@@ -20,7 +22,7 @@ const database = {
   async batch(queries) { batches++; statements += queries.length; return queries.map(({sql,ids}) => ({results:sqlite.prepare(sql).all(...ids)})); },
 };
 const source = readFileSync(new URL("../app/lib/api-worker.ts",import.meta.url),"utf8").replace(/^import .*;\r?\n/gm,"");
-const js = ts.transpileModule(source+"\nexport { courseRead };",{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
+const js = ts.transpileModule("const z=globalThis.__testZod;\n"+source+"\nexport { courseRead };",{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
 const {courseRead} = await import("data:text/javascript;base64,"+Buffer.from(js).toString("base64"));
 const data = await loadCourseRows(database,[1]);
 assert.equal(data.lectures.some(lecture=>"captions_json" in lecture),false,"UI queries must not transfer cached signed caption payloads");

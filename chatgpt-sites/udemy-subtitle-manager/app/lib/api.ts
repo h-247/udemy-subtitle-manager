@@ -127,6 +127,10 @@ export const api = {
   },
 
   courses: {
+    async tags(): Promise<string[]> {
+      return request<string[]>("/courses/tags");
+    },
+
     async importCourse(url: string, tags: string[] = []): Promise<ProcessingJob> {
       return request<ProcessingJob>("/courses/import", {
         method: "POST",

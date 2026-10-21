@@ -10,15 +10,23 @@ interface CourseImportModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSuccess: (message: string, job: ProcessingJob) => void;
+  existingTags: string[];
 }
 
-export default function CourseImportModal({ isOpen, onClose, onSuccess }: CourseImportModalProps) {
+export default function CourseImportModal({ isOpen, onClose, onSuccess, existingTags }: CourseImportModalProps) {
   const [url, setUrl] = useState("");
   const [tags, setTags] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   if (!isOpen) return null;
+
+  const selectedTags = tags.split(",").map((tag) => tag.trim().toLowerCase()).filter(Boolean);
+  const toggleExistingTag = (tag: string) => {
+    const parts = tags.split(",").map((item) => item.trim()).filter(Boolean);
+    const exists = parts.some((item) => item.toLowerCase() === tag.toLowerCase());
+    setTags((exists ? parts.filter((item) => item.toLowerCase() !== tag.toLowerCase()) : [...parts, tag]).join(", "));
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -93,6 +101,18 @@ export default function CourseImportModal({ isOpen, onClose, onSuccess }: Course
             <input id="import-course-tags" value={tags} onChange={(event) => setTags(event.target.value)} disabled={loading}
               placeholder="AI, English, To learn" className="w-full px-3.5 py-2.5 bg-[#1A1A1A] border border-[#333333] rounded-xl text-sm text-[#ECECEC] placeholder-[#737373] focus:outline-none focus:border-white" />
             <p className="text-[11px] text-[#A3A3A3]">Separate tags with commas. Up to 12 tags, 32 characters each.</p>
+            {existingTags.length > 0 && <div className="space-y-2 pt-1">
+              <p className="text-xs text-[#A3A3A3]">Choose tags already used in your courses</p>
+              <div className="flex flex-wrap gap-2" aria-label="Existing course tags">
+                {existingTags.map((tag) => {
+                  const selected = selectedTags.includes(tag.toLowerCase());
+                  return <button key={tag} type="button" aria-pressed={selected} disabled={loading} onClick={() => toggleExistingTag(tag)}
+                    className={`px-2.5 py-1 rounded-lg border text-xs transition-colors ${selected ? "border-sky-400 bg-sky-500/20 text-sky-200" : "border-[#444] bg-[#1A1A1A] text-[#BDBDBD] hover:border-sky-500/50"}`}>
+                    {selected ? "✓ " : "+ "}{tag}
+                  </button>;
+                })}
+              </div>
+            </div>}
           </div>
           <p className="text-xs text-[#A3A3A3]">The course curriculum imports first, then subtitles download and sync to connected Drive automatically. Processing starts in the background and continues after you close this page.</p>
           <div className="flex justify-end space-x-3 pt-3 border-t border-[#333333]">

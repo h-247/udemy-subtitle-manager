@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
 import {readFileSync} from 'node:fs';
 import ts from 'typescript';
+import {z} from 'zod';
+globalThis.__testZod=z;
 
 const sql = new DatabaseSync(':memory:');
 for (const name of ['0000_fearless_gateway','0001_dark_toxin','0002_reliable_jobs']) sql.exec(readFileSync(new URL(`../drizzle/${name}.sql`,import.meta.url),'utf8'));
@@ -12,7 +14,7 @@ INSERT INTO lectures(id,section_id,lecture_id,title,url) VALUES(1,1,'11079904','
 const db={prepare(query){let args=[];return{bind(...values){args=values;return this;},async first(){return sql.prepare(query).get(...args)||null;},async run(){return sql.prepare(query).run(...args);}};}};
 globalThis.__captionEnv={DB:db};
 const source=readFileSync(new URL('../app/lib/api-worker.ts',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'');
-const js=ts.transpileModule('const env=globalThis.__captionEnv;\n'+source+'\nexport {subtitleContent,ownedLecture};',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
+const js=ts.transpileModule('const z=globalThis.__testZod; const env=globalThis.__captionEnv; const getDb=()=>env.DB;\n'+source+'\nexport {subtitleContent,ownedLecture};',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
 const {subtitleContent,ownedLecture}=await import('data:text/javascript;base64,'+Buffer.from(js).toString('base64'));
 const lecture=await ownedLecture(1,1);
 assert.equal(lecture.course_id,3); assert.equal(lecture.udemy_course_id,'999');

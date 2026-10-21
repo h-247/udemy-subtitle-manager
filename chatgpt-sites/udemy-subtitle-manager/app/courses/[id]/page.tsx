@@ -280,7 +280,8 @@ function CourseContentDetail() {
       } else {
         await api.subtitles.deleteForLecture(lectureId);
       }
-      setToastMessage("Subtitle deleted successfully!");
+      setToastMessage("Subtitle deletion queued. Cleanup will retry until all files are removed.");
+      await loadJobs();
       await loadCourse(true);
     } catch (err: unknown) {
       setToastMessage(err instanceof Error ? err.message : "Failed to delete subtitle.");
@@ -300,7 +301,8 @@ function CourseContentDetail() {
       for (const id of selectedLectureIds) {
         await api.subtitles.deleteForLecture(id);
       }
-      setToastMessage(`Deleted subtitles for ${selectedLectureIds.length} lectures successfully!`);
+      setToastMessage(`Subtitle deletion queued for ${selectedLectureIds.length} lectures.`);
+      await loadJobs();
       setSelectedLectureIds([]);
       await loadCourse(true);
     } catch (err: unknown) {
@@ -442,7 +444,7 @@ function CourseContentDetail() {
         </div>
 
         {/* Active background jobs bar */}
-        <JobProgressBar jobs={jobs} onCancelJob={handleCancelJob} />
+        <JobProgressBar jobs={jobs} onCancelJob={handleCancelJob} onReconnect={() => setIsConnectionsOpen(true)} />
 
         {/* Course Hero & Controls */}
         <div className="p-6 bg-[#262626] border border-[#333333] rounded-2xl shadow-sm space-y-6">
@@ -817,6 +819,11 @@ function CourseContentDetail() {
                                     >
                                       {sub.status}
                                     </span>
+                                    {sub.error_message && (
+                                      <div className="max-w-[220px] text-[10px] text-[#A3A3A3] leading-snug" title={sub.error_message}>
+                                        {sub.error_message}
+                                      </div>
+                                    )}
                                     {sub.subtitle_type !== "NONE" && (
                                       <div className="text-[10px] text-[#A3A3A3]">
                                         {sub.language.toUpperCase()} ({sub.subtitle_type})
@@ -940,7 +947,7 @@ function CourseContentDetail() {
       <ConnectionPanel
         isOpen={isConnectionsOpen}
         onClose={() => setIsConnectionsOpen(false)}
-        onStatusChange={() => refreshUser()}
+        onStatusChange={() => { void refreshUser(); void loadJobs(); }}
       />
 
       <LectureEditModal

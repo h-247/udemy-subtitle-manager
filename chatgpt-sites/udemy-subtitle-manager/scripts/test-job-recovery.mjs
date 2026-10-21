@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
 import {readFileSync} from 'node:fs';
 import ts from 'typescript';
+import {z} from 'zod';
+import {courseImportSchema,lectureUpdateSchema,requestObjectSchema,subtitleProcessSchema} from '../app/lib/api-validation.ts';
+globalThis.__testZod=z;
+globalThis.__testApiSchemas={courseImportSchema,lectureUpdateSchema,requestObjectSchema,subtitleProcessSchema};
 import {normalizeCourseTags} from '../app/lib/course-tags.ts';
 const sql = new DatabaseSync(':memory:');
 for (const name of ['0000_fearless_gateway','0001_dark_toxin']) sql.exec(readFileSync(new URL(`../drizzle/${name}.sql`,import.meta.url),'utf8'));
@@ -25,14 +29,14 @@ db.batch = async (queries) => {
 };
 globalThis.__normalizeCourseTags=normalizeCourseTags;
 const objects=new Map();let downloads=0,uploads=0,gate,release;
-const bucket={async put(key,value){objects.set(key,value);},async get(key){return objects.has(key)?{text:async()=>objects.get(key)}:null;}};
-globalThis.__testEnv={DB:db,BUCKET:bucket};
+const bucket={async delete(key){objects.delete(key);},async put(key,value){objects.set(key,value);},async get(key){return objects.has(key)?{text:async()=>objects.get(key)}:null;}};
+globalThis.__testEnv={DB:db,BUCKET:bucket,SECRET_KEY:"test-encryption-key-123456789012345678901234567890",GOOGLE_CLIENT_ID:"client",GOOGLE_CLIENT_SECRET:"secret"};
 globalThis.fetch=async(url)=>{
   if(String(url).includes('captions.example')) {downloads++;if(gate) await gate;return new Response('WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello');}
   throw new Error('Unexpected network '+url);
 };
 const source=readFileSync(new URL('../app/lib/api-worker.ts',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'');
-async function load(){const js=ts.transpileModule('const env=globalThis.__testEnv; const normalizeCourseTags=globalThis.__normalizeCourseTags;\n'+source+'\nexport {courseRoutes};',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;return import('data:text/javascript;base64,'+Buffer.from(js).toString('base64')+'#'+Math.random());}
+async function load(){const js=ts.transpileModule('const z=globalThis.__testZod; const {courseImportSchema,lectureUpdateSchema,requestObjectSchema,subtitleProcessSchema}=globalThis.__testApiSchemas; const env=globalThis.__testEnv; const getDb=()=>env.DB; const normalizeCourseTags=globalThis.__normalizeCourseTags;\n'+source+'\nexport {migrateDriveCredentials,courseRoutes,saveUdemySession,normalizeDriveCredentials,driveAccessToken,decrypt};',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;return import('data:text/javascript;base64,'+Buffer.from(js).toString('base64')+'#'+Math.random());}
 let worker=await load();
 sql.prepare("INSERT INTO processing_jobs(user_id,course_id,job_type,payload_json,total_items) VALUES(1,1,'SUBTITLE_BATCH',?,1)").run(JSON.stringify({lecture_ids:[1],language:'en',cursor:0}));
 gate=new Promise(resolve=>release=resolve);
@@ -95,3 +99,41 @@ assert.equal(sql.prepare('SELECT status FROM processing_jobs WHERE id=?').get(se
 await worker.resumeUserJobs('owner');
 assert.equal(sql.prepare('SELECT status FROM processing_jobs WHERE id=?').get(second.id).status,'COMPLETED');
 console.log('PASS: background resume drains persisted jobs for the trusted user without dashboard GET side effects');
+sql.exec("UPDATE users SET drive_credentials=NULL; UPDATE lectures SET captions_json='[]'; DELETE FROM udemy_sessions; INSERT INTO lectures(id,section_id,lecture_id,title,url) VALUES(3,1,'second','Second','https://www.udemy.com/course/test/')");
+sql.prepare("INSERT INTO processing_jobs(user_id,job_type,payload_json,total_items) VALUES(1,'SUBTITLE_BATCH',?,2)").run(JSON.stringify({lecture_ids:[1,3],cursor:0}));
+await worker.processPendingJob(1);await worker.processPendingJob(1);
+const paused=sql.prepare('SELECT * FROM processing_jobs ORDER BY id DESC LIMIT 1').get();
+assert.equal(paused.status,'WAITING_SESSION');assert.equal(paused.failed_items,0);assert.equal(paused.completed_items,1);assert.equal(JSON.parse(paused.payload_json).cursor,1);
+await worker.saveUdemySession({id:1},{text:'.udemy.com\tTRUE\t/\tTRUE\t0\tsession\ttest',businessDomain:null},{status:'CONNECTED',accountName:null,error:null});
+let resumedDownloads=0;
+globalThis.fetch=async(url)=>String(url).includes('/api-2.0/')?Response.json({asset:{captions:[{locale_id:'en',url:'https://captions.example/new'}]}}):(resumedDownloads++,new Response('WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nResume'));
+await (await load()).processPendingJob(1);
+assert.equal(sql.prepare('SELECT status FROM processing_jobs WHERE id=?').get(paused.id).status,'COMPLETED');assert.equal(resumedDownloads,1);assert.equal(downloads,1);
+console.log('PASS: reconnect resumes the same lecture preserving cursor, counters and completed downloads');
+sql.prepare('UPDATE users SET drive_credentials=? WHERE id=1').run(JSON.stringify({access_token:'legacy-access',refresh_token:'legacy-refresh',expires_at:0}));
+const owner=sql.prepare('SELECT * FROM users WHERE id=1').get();await worker.migrateDriveCredentials();owner.drive_credentials=sql.prepare('SELECT drive_credentials FROM users WHERE id=1').get().drive_credentials;const credentials=await worker.normalizeDriveCredentials(owner);
+let encrypted=sql.prepare('SELECT drive_credentials FROM users WHERE id=1').get().drive_credentials;
+assert.ok(encrypted.startsWith('v1.'));assert.ok(!encrypted.includes('legacy-access'));assert.ok(!encrypted.includes('legacy-refresh'));
+globalThis.fetch=async()=>Response.json({access_token:'refreshed-access',expires_in:3600});
+assert.equal(await worker.driveAccessToken(owner,credentials),'refreshed-access');
+encrypted=sql.prepare('SELECT drive_credentials FROM users WHERE id=1').get().drive_credentials;
+assert.ok(encrypted.startsWith('v1.'));assert.ok(!encrypted.includes('refreshed-access'));assert.equal(JSON.parse(await worker.decrypt(encrypted)).refresh_token,'legacy-refresh');
+console.log('PASS: legacy Drive connections migrate and refreshed tokens stay encrypted');
+sql.exec("UPDATE subtitles SET drive_file_id='cleanup-file' WHERE lecture_id=3");
+assert.equal((await worker.courseRoutes(new Request('https://site/api/courses/1',{method:'DELETE'}),owner,['1'],new URL('https://site/api/courses/1'))).status,202);
+const cleanup=sql.prepare("SELECT * FROM processing_jobs WHERE job_type='CLEANUP'").get();
+sql.exec("INSERT INTO job_leases VALUES(1,'active-download',unixepoch()+600)");
+assert.equal(await worker.processPendingJob(1),false);assert.ok(sql.prepare('SELECT id FROM courses WHERE id=1').get(),'Deletion waits for active processing');
+sql.exec("DELETE FROM job_leases WHERE user_id=1");
+await assert.rejects(worker.courseRoutes(request([]),owner,['import'],importUrl),/deletion is pending/);
+const realBatch=db.batch;
+db.batch=async(queries)=>{sql.exec('BEGIN');try{await queries[0].run();throw Error('interrupted transaction');}finally{sql.exec('ROLLBACK');}};await worker.processPendingJob(1);db.batch=realBatch;assert.ok(sql.prepare('SELECT id FROM courses WHERE id=1').get());
+sql.prepare('UPDATE processing_jobs SET retry_at=0 WHERE id=?').run(cleanup.id);await (await load()).processPendingJob(1);
+assert.equal(sql.prepare('SELECT id FROM courses WHERE id=1').get(),undefined);assert.ok(JSON.parse(sql.prepare('SELECT payload_json FROM processing_jobs WHERE id=?').get(cleanup.id).payload_json).files.length);
+let failDelete=true,deletes=0;globalThis.fetch=async(_url,init)=>{assert.equal(init.method,'DELETE');assert.ok(init.signal);deletes++;return new Response(null,{status:failDelete?503:404});};
+await worker.processPendingJob(1);assert.equal(sql.prepare('SELECT status FROM processing_jobs WHERE id=?').get(cleanup.id).status,'PENDING');for(let i=0;i<9;i++){sql.prepare('UPDATE processing_jobs SET retry_at=0 WHERE id=?').run(cleanup.id);await (await load()).processPendingJob(1);}
+assert.equal(sql.prepare('SELECT status FROM processing_jobs WHERE id=?').get(cleanup.id).status,'PENDING','Cleanup remains retryable after eight failures');
+failDelete=false;
+for(let i=0;i<10;i++){sql.prepare('UPDATE processing_jobs SET retry_at=0 WHERE id=?').run(cleanup.id);await (await load()).processPendingJob(1);}
+assert.equal(sql.prepare('SELECT status FROM processing_jobs WHERE id=?').get(cleanup.id).status,'COMPLETED');assert.equal(objects.size,0);assert.ok(deletes>=2);
+console.log('PASS: interrupted deletion rollback, manifest survives cascade, timeout signal, restart recovery, idempotent Drive 404 and eventual R2 removal');

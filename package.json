@@ -1,0 +1,20 @@
+{
+  "name": "udemy-subtitle-manager",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "install:ci": "npm --prefix chatgpt-sites/udemy-subtitle-manager run install:ci",
+    "dev": "npm --prefix chatgpt-sites/udemy-subtitle-manager run dev",
+    "build": "npm --prefix chatgpt-sites/udemy-subtitle-manager run build",
+    "preview": "npm --prefix chatgpt-sites/udemy-subtitle-manager run preview",
+    "typecheck": "npm --prefix chatgpt-sites/udemy-subtitle-manager run typecheck",
+    "test": "npm --prefix chatgpt-sites/udemy-subtitle-manager test",
+    "test:e2e": "npm --prefix chatgpt-sites/udemy-subtitle-manager run test:e2e",
+    "db:generate": "npm --prefix chatgpt-sites/udemy-subtitle-manager run db:generate",
+    "db:migrate:local": "npm --prefix chatgpt-sites/udemy-subtitle-manager run db:migrate:local",
+    "sites:create": "npm --prefix chatgpt-sites/udemy-subtitle-manager exec create-sites --",
+    "test:release-snapshot": "node scripts/test-release-snapshot.mjs"
+  }
+}

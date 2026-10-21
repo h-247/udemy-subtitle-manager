@@ -8,38 +8,24 @@ echo              UDEMY SUBTITLE MANAGER - LOCAL LAUNCHER
 echo ===================================================================
 echo.
 
-:: 1. Check or prepare environment files
-if not exist ".env" (
-    echo [Info] Creating .env from .env.example ...
-    copy /y .env.example .env >nul
-)
-if not exist "backend\.env" (
-    copy /y .env.example backend\.env >nul
-)
-if not exist "frontend\.env.local" (
-    echo NEXT_PUBLIC_API_URL=http://127.0.0.1:8050/api > frontend\.env.local
+if not exist "chatgpt-sites\udemy-subtitle-manager\node_modules\.bin\vite.cmd" (
+    echo [Info] Installing Node.js and Vite dependencies...
+    npm.cmd --prefix "chatgpt-sites\udemy-subtitle-manager" run install:ci
+    if errorlevel 1 exit /b 1
 )
 
-:: 2. Launch Backend (FastAPI on http://127.0.0.1:8050)
-echo [1/3] Starting Backend Server (FastAPI on http://127.0.0.1:8050)...
-start "Udemy Subtitle Manager - Backend" /min cmd /c "cd /d "%~dp0backend" && .\venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8050"
+echo [Info] Applying committed D1 migrations to local Wrangler state...
+npm.cmd --prefix "chatgpt-sites\udemy-subtitle-manager" run db:migrate:local
+if errorlevel 1 exit /b 1
 
-:: 3. Launch Frontend (Next.js on http://localhost:3050)
-echo [2/3] Starting Frontend Server (Next.js on http://localhost:3050)...
-start "Udemy Subtitle Manager - Frontend" /min cmd /c "cd /d "%~dp0frontend" && npm run dev"
+echo [1/2] Starting the Vite and TypeScript app on http://localhost:5173...
+start "Udemy Subtitle Manager - Vite" /min cmd /c "cd /d "%~dp0chatgpt-sites\udemy-subtitle-manager" && npm.cmd run dev"
 
-:: 4. Wait for servers to initialize and open web browser
-echo [3/3] Opening application in default web browser...
-timeout /t 4 /nobreak >nul
-start http://localhost:3050
+echo [2/2] Opening the local app in your browser...
+timeout /t 7 /nobreak >nul
+start http://localhost:5173
 
 echo.
-echo ===================================================================
-echo   Udemy Subtitle Manager is running!
-echo   - Web App:      http://localhost:3050
-echo   - Backend Docs: http://127.0.0.1:8050/docs
-echo.
-echo   To stop the application, run 'stop_app.bat' or close the windows.
-echo ===================================================================
-echo.
-timeout /t 5 >nul
+echo The app is running at http://localhost:5173
+echo To stop it, run stop_app.bat.
+timeout /t 3 >nul

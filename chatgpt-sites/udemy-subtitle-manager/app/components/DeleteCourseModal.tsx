@@ -66,7 +66,7 @@ export default function DeleteCourseModal({ course, isOpen, onClose, onDeleted }
             <p className="font-medium text-[#ECECEC]">Google Drive Notice:</p>
             <p>
               This action will remove the course, sections, and lectures from your local database.
-              <span className="text-rose-400 font-medium"> All subtitle files and course folders stored on Google Drive will also be permanently deleted.</span>
+              <span className="text-rose-400 font-medium"> Subtitle files stored on Google Drive will also be permanently deleted. Cleanup continues in the background.</span>
             </p>
           </div>
 

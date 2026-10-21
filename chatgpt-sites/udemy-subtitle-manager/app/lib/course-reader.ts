@@ -1,6 +1,12 @@
+import type { SitesDatabase } from "../../db";
+
 type Row = Record<string, any>;
 
-export async function loadCourseRows(database: D1Database, ids: number[]) {
+export async function loadCourseRows(database: SitesDatabase, ids: number[]): Promise<{
+  sections: Row[];
+  lectures: Row[];
+  subtitles: Row[];
+}> {
   if (!ids.length) return { sections: [], lectures: [], subtitles: [] };
   const placeholders = ids.map(() => "?").join(",");
   const [sections, lectures, subtitles] = await database.batch<Row>([

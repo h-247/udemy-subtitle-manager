@@ -97,8 +97,8 @@ export interface CourseListResponse {
   total: number;
 }
 
-export type JobType = 'COURSE_IMPORT' | 'SUBTITLE_BATCH' | 'SUBTITLE_SINGLE';
-export type JobStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+export type JobType = 'CLEANUP' | 'COURSE_IMPORT' | 'SUBTITLE_BATCH' | 'SUBTITLE_SINGLE';
+export type JobStatus = 'WAITING_SESSION' | 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 
 export interface ProcessingJob {
   attempts: number;

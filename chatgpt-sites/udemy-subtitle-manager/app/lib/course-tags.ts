@@ -1,3 +1,5 @@
+import type { SitesDatabase } from "../../db";
+
 export function normalizeCourseTags(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > 100) throw new TypeError("Tags must be a list of up to 12 names.");
   const result: string[] = [];
@@ -15,7 +17,7 @@ export function normalizeCourseTags(value: unknown): string[] {
   return result;
 }
 
-export async function saveCourseTags(database: D1Database, userId: number, courseId: number, input: unknown) {
+export async function saveCourseTags(database: SitesDatabase, userId: number, courseId: number, input: unknown) {
   const tags = normalizeCourseTags(input);
   const row = await database.prepare("UPDATE courses SET tags_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? RETURNING tags_json")
     .bind(JSON.stringify(tags), courseId, userId).first<{ tags_json: string }>();
