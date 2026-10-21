@@ -817,6 +817,11 @@ function CourseContentDetail() {
                                     >
                                       {sub.status}
                                     </span>
+                                    {sub.error_message && (
+                                      <div className="max-w-[220px] text-[10px] text-[#A3A3A3] leading-snug" title={sub.error_message}>
+                                        {sub.error_message}
+                                      </div>
+                                    )}
                                     {sub.subtitle_type !== "NONE" && (
                                       <div className="text-[10px] text-[#A3A3A3]">
                                         {sub.language.toUpperCase()} ({sub.subtitle_type})

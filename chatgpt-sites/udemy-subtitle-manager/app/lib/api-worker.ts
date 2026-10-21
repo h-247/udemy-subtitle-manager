@@ -804,7 +804,13 @@ async function subtitleContent(lecture: Row, language: string, cookies: CookieBu
     await db().prepare("UPDATE lectures SET captions_json=? WHERE id=?").bind(JSON.stringify(captions), lecture.id).run();
   };
   let refreshed = false;
-  if (!chooseCaption(captions,language).caption && cookies) { await refresh(); refreshed = true; }
+  if (!chooseCaption(captions,language).caption) {
+    if (!cookies) {
+      return { error: "Udemy session is unavailable, so subtitle tracks could not be checked. Reconnect Udemy and retry.", category: "SESSION_REQUIRED" };
+    }
+    await refresh();
+    refreshed = true;
+  }
   for (;;) {
     const selected = chooseCaption(captions, language);
     const captionUrl = selected.caption?.url || selected.caption?.download_url;
@@ -847,7 +853,7 @@ async function processSubtitle(user: UserRow, lecture: Row, language: string) {
       await database.prepare(`INSERT INTO subtitles (lecture_id,language,subtitle_type,status,error_category,error_message,last_processed_at)
         VALUES (?,?,'NONE',?,?,?,?) ON CONFLICT(lecture_id,language) DO UPDATE SET status=excluded.status,error_category=excluded.error_category,error_message=excluded.error_message,last_processed_at=excluded.last_processed_at`)
         .bind(lecture.id, language, result.category === "NO_SUBTITLES" ? "NO_SUBTITLES" : "FAILED", result.category, result.error, now()).run();
-      if (result.category !== "NO_SUBTITLES") throw new Error(result.error);
+      if (result.category !== "NO_SUBTITLES" && result.category !== "SESSION_REQUIRED") throw new Error(result.error);
       return false;
     }
     content = result.content;

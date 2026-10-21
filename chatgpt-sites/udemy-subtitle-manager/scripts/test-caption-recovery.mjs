@@ -48,6 +48,7 @@ globalThis.fetch=async()=>new Response('<html>Sign in</html>');
 assert.equal((await subtitleContent({...lecture,captions_json:JSON.stringify(cached)},'en',cookies)).category,'CAPTION_ERROR');
 globalThis.fetch=async()=>Response.json({asset:{captions:[]}});
 assert.equal((await subtitleContent({...lecture,captions_json:'[]'},'en',cookies)).category,'NO_SUBTITLES');
+assert.equal((await subtitleContent({...lecture,captions_json:'[]'},'en',null)).category,'SESSION_REQUIRED');
 console.log('PASS: remote course ID, expired caption refresh on 401/403/404, no CDN credential leakage, bounded retries, access errors, invalid HTML and absent captions');
 
 // Exercise the real Worker fetch wrapper with a controlled execution context.
