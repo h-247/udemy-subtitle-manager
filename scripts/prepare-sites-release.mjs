@@ -65,7 +65,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
     if (git(root, 'status', '--porcelain').toString().trim()) throw Error('Commit intended changes before preparing a release');
     const commit = git(root, 'rev-parse', 'HEAD').toString().trim();
-    const runs = JSON.parse(execFileSync('gh', ['run', 'list', '--commit', commit, '--workflow', 'Release checks', '--json', 'conclusion,status,event,headSha'], { cwd: root, encoding: 'utf8' }));
+    const runs = JSON.parse(execFileSync('gh', ['run', 'list', '--limit', '100', '--json', 'conclusion,status,event,headSha'], { cwd: root, encoding: 'utf8' }));
     if (!runs.some(run => run.headSha === commit && run.status === 'completed' && run.conclusion === 'success' && run.event === 'push')) throw Error('This commit has no successful push release-check run');
     console.log(prepareSnapshot(root, commit, path.join(root, 'output/sites-releases')));
   }
