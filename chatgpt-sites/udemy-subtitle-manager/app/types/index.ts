@@ -115,6 +115,26 @@ export interface ProcessingJob {
   error_message?: string | null;
   created_at: string;
   updated_at: string;
+  stalled?: boolean;
+}
+
+export interface DispatcherHealth {
+  status: string;
+  heartbeat_at: string | null;
+  last_started_at: string | null;
+  last_finished_at: string | null;
+  advanced: number;
+  error: string | null;
+  stalled: boolean;
+  stale: boolean;
+  stale_reason: string | null;
+}
+
+export interface RuntimeHealth {
+  status: string;
+  commit: string;
+  dispatcher: DispatcherHealth | null;
+  queue: { oldest_queued_at: string | null; oldest_queued_age_seconds: number; runnable_jobs: number; overdue_runnable_jobs: number; stalled_jobs: number };
 }
 
 export interface DriveStatus {

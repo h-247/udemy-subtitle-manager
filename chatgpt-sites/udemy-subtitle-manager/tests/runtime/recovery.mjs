@@ -5,6 +5,11 @@ import { setTimeout } from 'node:timers/promises';
 const runtime = await createRuntime();
 try {
   await runtime.seed();
+  const missingHeartbeat = await (await runtime.request('/api/health')).json();
+  assert.equal(missingHeartbeat.status,'degraded');
+  assert.equal(missingHeartbeat.dispatcher.status,'NEVER_RUN');
+  assert.equal(missingHeartbeat.dispatcher.stale,true);
+  assert.match(missingHeartbeat.dispatcher.stale_reason,/No valid dispatcher heartbeat/);
   await runtime.reconnect();
   runtime.expireSession(true);
   const imported = await runtime.request('/api/courses/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url: 'https://www.udemy.com/course/browser-import/', tags: ['recovery'] }) });
@@ -67,6 +72,39 @@ try {
   }
   assert.deepEqual(await (await runtime.request('/api/jobs', { headers })).json(), []);
   assert.equal((await runtime.request('/api/internal/jobs/run', { method: 'POST' })).status, 401);
+  await runtime.seed(); await runtime.queue();
+  const manualWake = await runtime.request('/api/jobs/run', { method:'POST' });
+  assert.equal(manualWake.status,200);
+  assert.equal((await manualWake.json()).advanced,true,'dashboard recovery action advances the signed-in user job');
+  assert.equal((await runtime.db.prepare('SELECT status FROM processing_jobs WHERE id=1').first()).status,'COMPLETED');
+  await runtime.seed(); await runtime.queue();
+  await runtime.db.prepare("UPDATE processing_jobs SET created_at=datetime('now','-2 hours'),updated_at=datetime('now','-20 minutes') WHERE id=1").run();
+  assert.equal((await (await runtime.request('/api/jobs')).json())[0].stalled,true);
+  const queueHealth = await (await runtime.request('/api/health')).json();
+  assert.equal(queueHealth.status,'degraded');
+  assert.equal(queueHealth.queue.stalled_jobs,1);
+  assert.equal(queueHealth.queue.overdue_runnable_jobs,1);
+  assert.ok(queueHealth.queue.oldest_queued_age_seconds >= 7100);
+  await runtime.db.prepare("UPDATE users SET drive_credentials='not-json' WHERE id=1").run();
+  const simulatedFailure = await runtime.request('/api/internal/jobs/run', { method:'POST', headers:{Authorization:'Bearer runtime-runner-secret'} });
+  assert.equal(simulatedFailure.status,500);
+  const failedHealth = await (await runtime.request('/api/health')).json();
+  assert.equal(failedHealth.dispatcher.status,'FAILED');
+  assert.ok(failedHealth.dispatcher.error);
+  await runtime.db.prepare('UPDATE users SET drive_credentials=NULL WHERE id=1').run();
+  await runtime.dispatch();
+  const recoveredHealth = await (await runtime.request('/api/health')).json();
+  assert.equal(recoveredHealth.status,'ok');
+  assert.equal(recoveredHealth.dispatcher.status,'SUCCEEDED');
+  assert.ok(recoveredHealth.dispatcher.heartbeat_at);
+  await runtime.db.prepare("UPDATE dispatcher_status SET heartbeat_at=datetime('now','-20 minutes') WHERE id=1").run();
+  const staleSuccess = await (await runtime.request('/api/health')).json();
+  assert.equal(staleSuccess.status,'degraded','a stopped scheduler is detected after a successful run');
+  assert.equal(staleSuccess.dispatcher.status,'SUCCEEDED');
+  assert.equal(staleSuccess.dispatcher.stale,true);
+  assert.match(staleSuccess.dispatcher.stale_reason,/scheduled runner may have stopped/);
+  await runtime.dispatch();
+  assert.equal((await (await runtime.request('/api/health')).json()).status,'ok','a fresh heartbeat clears scheduler degradation');
   console.log('PASS: workerd/D1/R2 overlapping dispatch, disk restart, expired lease, Drive-only retry, lost upload confirmation, caption reuse, user isolation');
 } finally { await runtime.close(); }
 

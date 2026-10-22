@@ -28,6 +28,26 @@ test('dashboard → course → back and subtitle download', async ({ page }) => 
   await expect(page.getByRole('heading', { name: 'Runtime Course' })).toBeVisible();
 });
 
+test('dashboard pagination and filters include courses beyond the first API page', async ({ page, request }) => {
+  await expect(await request.post(`${control}/pagination-seed`)).toBeOK();
+  await page.goto('/dashboard');
+  await expect(page.getByRole('heading', { name: 'Runtime Library Course 01' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Runtime Library Course 20' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Runtime Library Course 21' })).toHaveCount(0);
+  await expect(page.getByText('Showing 1–20 of 25 courses')).toBeVisible();
+  await page.getByRole('button', { name: 'Next course page' }).click();
+  await expect(page.getByRole('heading', { name: 'Archived React Course' })).toBeVisible();
+  await expect(page.getByText('Showing 21–25 of 25 courses')).toBeVisible();
+
+  await page.getByRole('combobox', { name: 'Filter by tag' }).selectOption('tag:legacy');
+  await expect(page.getByRole('heading', { name: 'Archived React Course' })).toBeVisible();
+  await expect(page.getByTestId('course-card')).toHaveCount(1);
+  await page.getByRole('combobox', { name: 'Filter by tag' }).selectOption('all');
+  await page.getByRole('searchbox', { name: 'Search courses' }).fill('Archived React');
+  await expect(page.getByRole('heading', { name: 'Archived React Course' })).toBeVisible();
+  await expect(page.getByTestId('course-card')).toHaveCount(1);
+});
+
 test('real import survives browser closure, Worker restart and Udemy reconnection', async ({ page, context, request }) => {
   await expect(await request.post(`${control}/workflow`)).toBeOK();
   await page.goto('/dashboard');

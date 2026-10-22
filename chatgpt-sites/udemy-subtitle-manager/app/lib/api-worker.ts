@@ -1,6 +1,6 @@
 import { releaseCommit } from "./release";
 import { normalizeCourseTags } from "./course-tags";
-import { loadCourseRows } from "./course-reader";
+import { loadCourseRows, loadCourseSummaries } from "./course-reader";
 import { env } from "cloudflare:workers";
 import { getDb, type SitesDatabase } from "../../db";
 import { getChatGPTUser } from "../chatgpt-auth";
@@ -404,8 +404,13 @@ async function courseRoutes(request: Request, user: UserRow, path: string[], url
     const bind = search ? [user.id, term] : [user.id];
     const total = await database.prepare(search ? "SELECT COUNT(*) AS total FROM courses WHERE user_id=? AND title LIKE ? ESCAPE '\\'" : "SELECT COUNT(*) AS total FROM courses WHERE user_id=?").bind(...bind).first<Row>();
     const rows = await database.prepare(`${query} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`).bind(...bind, pageSize, (page - 1) * pageSize).all<Row>();
-    const data = await loadCourseRows(database, rows.results.map((course) => course.id));
-    const items = await Promise.all(rows.results.map((course) => courseRead(course, false, data)));
+    const summaries = await loadCourseSummaries(database, rows.results.map((course) => Number(course.id)));
+    const items = rows.results.map((course) => ({
+      id: Number(course.id), course_id: String(course.course_id), title: course.title, url: course.url,
+      tags: JSON.parse(course.tags_json || "[]") as string[], instructor: course.instructor ?? null,
+      thumbnail_url: course.thumbnail_url ?? null, ...summaries.get(Number(course.id)),
+      last_synced_at: course.last_synced_at, created_at: course.created_at,
+    }));
     return json({ items, total: Number(total?.total || 0) });
   }
   if (path[0] === "lectures" && path.length === 2 && request.method === "PATCH") {
@@ -544,7 +549,10 @@ async function subtitleRoutes(request: Request, user: UserRow, path: string[], _
 
 async function jobRoutes(request: Request, user: UserRow, path: string[], url: URL) {
   const database = db();
-  if (path.length === 1 && path[0] === "run" && request.method === "POST") return json({scheduled:true},202);
+  if (path.length === 1 && path[0] === "run" && request.method === "POST") {
+    const advanced = await processPendingJob(user.id);
+    return json({ scheduled: true, advanced });
+  }
   if (!path.length && request.method === "GET") {
     // Job reads are side-effect free; the unattended dispatcher advances work.
     const courseId = Number(url.searchParams.get("course_id") || 0);
@@ -594,13 +602,16 @@ async function ensureJob(userId: number, jobType: string, courseId: number | nul
 }
 
 function jobRead(row: Row) {
+  const active = ["PENDING", "PROCESSING"].includes(row.status);
+  const due = row.retry_at == null || Number(row.retry_at) <= Math.floor(Date.now() / 1000);
+  const stalled = active && due && Date.parse(`${row.updated_at}Z`) < Date.now() - 15 * 60_000;
   return {
     id: Number(row.id), user_id: Number(row.user_id), course_id: row.course_id == null ? null : Number(row.course_id),
     job_type: row.job_type, status: row.status, total_items: Number(row.total_items),
     completed_items: Number(row.completed_items), failed_items: Number(row.failed_items),
     attempts: Number(row.attempts || 0), retry_at: row.retry_at == null ? null : Number(row.retry_at),
     progress_message: row.progress_message ?? null, error_message: row.error_message ?? null,
-    created_at: row.created_at, updated_at: row.updated_at,
+    created_at: row.created_at, updated_at: row.updated_at, stalled,
   };
 }
 
@@ -1217,17 +1228,72 @@ async function api(request: Request) {
   const path = url.pathname.replace(/^\/api\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
   const method = request.method.toUpperCase();
   if (!path.length && method === "GET") return json({ service: "Udemy Subtitle Manager API", runtime: "ChatGPT Sites Worker" });
-  if (path[0] === "health" && method === "GET") return json({ status: "ok", commit: releaseCommit });
+  if (path[0] === "health" && method === "GET") {
+    const [dispatcher, queue] = await Promise.all([
+      db().prepare("SELECT * FROM dispatcher_status WHERE id=1").first<Row>(),
+      db().prepare(`SELECT MIN(CASE WHEN retry_at IS NULL OR retry_at<=unixepoch() THEN created_at END) AS oldest_queued_at,
+        SUM(CASE WHEN retry_at IS NULL OR retry_at<=unixepoch() THEN 1 ELSE 0 END) AS runnable_jobs,
+        SUM(CASE WHEN (retry_at IS NULL OR retry_at<=unixepoch()) AND updated_at<=datetime('now','-15 minutes') THEN 1 ELSE 0 END) AS overdue_runnable_jobs
+        FROM processing_jobs WHERE status IN ('PENDING','PROCESSING')`).first<Row>(),
+    ]);
+    const heartbeatAgeMs = dispatcher?.heartbeat_at ? Date.now() - Date.parse(`${dispatcher.heartbeat_at}Z`) : Infinity;
+    const stale = !Number.isFinite(heartbeatAgeMs) || heartbeatAgeMs > 15 * 60_000;
+    const dispatcherFailed = dispatcher?.status === "FAILED";
+    const overdueRunnableJobs = Number(queue?.overdue_runnable_jobs || 0);
+    const degraded = stale || dispatcherFailed || overdueRunnableJobs > 0;
+    const staleReason = !dispatcher?.heartbeat_at || !Number.isFinite(heartbeatAgeMs) ? "No valid dispatcher heartbeat has been recorded." : stale
+      ? dispatcher.status === "RUNNING" ? "The running dispatcher heartbeat is older than 15 minutes."
+        : "The last dispatcher heartbeat is older than 15 minutes; the scheduled runner may have stopped."
+      : null;
+    return json({ status: degraded ? "degraded" : "ok", commit: releaseCommit,
+      dispatcher: dispatcher ? { status: dispatcher.status, heartbeat_at: dispatcher.heartbeat_at,
+        last_started_at: dispatcher.last_started_at, last_finished_at: dispatcher.last_finished_at,
+        advanced: Number(dispatcher.advanced || 0), error: dispatcher.error_message ?? null,
+        stale, stale_reason: staleReason, stalled: dispatcher.status === "RUNNING" && stale } : {
+          status: "NEVER_RUN", heartbeat_at: null, last_started_at: null, last_finished_at: null,
+          advanced: 0, error: null, stale: true, stale_reason: staleReason, stalled: false,
+        },
+      queue: { oldest_queued_at: queue?.oldest_queued_at ?? null,
+        oldest_queued_age_seconds: queue?.oldest_queued_at ? Math.max(0, Math.floor(Date.now() / 1000 - Date.parse(`${queue.oldest_queued_at}Z`) / 1000)) : 0,
+        runnable_jobs: Number(queue?.runnable_jobs || 0), overdue_runnable_jobs: overdueRunnableJobs,
+        stalled_jobs: overdueRunnableJobs },
+    });
+  }
   if (path[0] === "drive" && path[1] === "callback" && method === "GET") return driveCallback(request, url);
 
   if (path.join("/") === "internal/jobs/run" && method === "POST") {
     const secret = (env as any).JOB_RUNNER_SECRET;
     if (!secret || request.headers.get("Authorization") !== `Bearer ${secret}`) return fail("Unauthorized",401);
-    await migrateDriveCredentials();
-    const users = await db().prepare("SELECT DISTINCT user_id FROM processing_jobs WHERE status IN ('PENDING','PROCESSING') AND (retry_at IS NULL OR retry_at <= unixepoch()) ORDER BY updated_at LIMIT 8").all<Row>();
-    let advanced = 0;
-    for (const row of users.results) if (await processPendingJob(Number(row.user_id))) advanced++;
-    return json({advanced});
+    const database = db();
+    const runId = crypto.randomUUID();
+    await database.prepare(`INSERT INTO dispatcher_status(id,run_id,status,last_started_at,heartbeat_at,advanced,error_message) VALUES(1,?,'RUNNING',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,0,NULL)
+      ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,status='RUNNING',last_started_at=CURRENT_TIMESTAMP,heartbeat_at=CURRENT_TIMESTAMP,advanced=0,error_message=NULL`).bind(runId).run();
+    try {
+      await migrateDriveCredentials();
+      const users = await database.prepare("SELECT DISTINCT user_id FROM processing_jobs WHERE status IN ('PENDING','PROCESSING') AND (retry_at IS NULL OR retry_at <= unixepoch()) ORDER BY updated_at LIMIT 8").all<Row>();
+      let advanced = 0;
+      for (const row of users.results) {
+        if (await processPendingJob(Number(row.user_id))) advanced++;
+        await database.prepare("UPDATE dispatcher_status SET heartbeat_at=CURRENT_TIMESTAMP,advanced=? WHERE id=1 AND run_id=?").bind(advanced,runId).run();
+      }
+      await database.prepare("UPDATE dispatcher_status SET status='SUCCEEDED',heartbeat_at=CURRENT_TIMESTAMP,last_finished_at=CURRENT_TIMESTAMP,advanced=? WHERE id=1 AND run_id=?").bind(advanced,runId).run();
+      return json({advanced,run_id:runId});
+    } catch (error) {
+      const detail = error instanceof Error ? error.message.slice(0,500) : "Dispatcher failed.";
+      await database.prepare("UPDATE dispatcher_status SET status='FAILED',heartbeat_at=CURRENT_TIMESTAMP,last_finished_at=CURRENT_TIMESTAMP,error_message=? WHERE id=1 AND run_id=?").bind(detail,runId).run();
+      throw error;
+    }
+  }
+  if (path.join("/") === "internal/jobs/failed" && method === "POST") {
+    const secret = (env as any).JOB_RUNNER_SECRET;
+    if (!secret || request.headers.get("Authorization") !== `Bearer ${secret}`) return fail("Unauthorized",401);
+    const payload = await bodyJson(request);
+    const detail = typeof payload.error === "string" ? payload.error.slice(0,500) : "Dispatcher request failed.";
+    await db().prepare(`INSERT INTO dispatcher_status(id,run_id,status,last_started_at,heartbeat_at,last_finished_at,advanced,error_message)
+      VALUES(1,?,'FAILED',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,0,?)
+      ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,status='FAILED',heartbeat_at=CURRENT_TIMESTAMP,last_finished_at=CURRENT_TIMESTAMP,error_message=excluded.error_message`)
+      .bind(crypto.randomUUID(),detail).run();
+    return json({recorded:true});
   }
   const user = await currentUser();
   if (path[0] === "auth" && path[1] === "me" && method === "GET") return json(await apiUserProfile(user));

@@ -17,6 +17,17 @@ const controls = createServer(async (req, res) => {
       await runtime.seed();
       await runtime.reconnect();
       runtime.expireSession(true);
+    } else if (route === '/pagination-seed') {
+      await runtime.seed();
+      await runtime.db.prepare('DELETE FROM courses').run();
+      const courses = Array.from({ length: 25 }, (_, index) => {
+        const id = 25 - index;
+        const archived = index === 24;
+        return runtime.db.prepare('INSERT INTO courses(id,user_id,course_id,title,url,instructor,tags_json) VALUES(?,1,?,?,?,?,?)')
+          .bind(id, `library-${id}`, archived ? 'Archived React Course' : `Runtime Library Course ${String(index + 1).padStart(2, '0')}`,
+            `https://www.udemy.com/course/library-${id}/`, archived ? 'Legacy Instructor' : 'Runtime Instructor', JSON.stringify([archived ? 'legacy' : 'current']));
+      });
+      await runtime.db.batch(courses);
     } else if (route === '/restart') {
       await runtime.restart();
     } else if (route === '/reconnect') {

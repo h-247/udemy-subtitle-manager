@@ -5,6 +5,7 @@ import {
   Lecture,
   Subtitle,
   ProcessingJob,
+  RuntimeHealth,
   DriveStatus,
   UdemyStatusResponse,
 } from "../types";
@@ -54,6 +55,9 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 }
 
 export const api = {
+  async health(): Promise<RuntimeHealth> {
+    return request<RuntimeHealth>("/health");
+  },
   auth: {
     async register(email: string, password: string): Promise<User> {
       void email; void password;
@@ -221,11 +225,12 @@ export const api = {
 
   jobs: {
     async retry(jobId: number): Promise<ProcessingJob> { return request<ProcessingJob>(`/jobs/${jobId}/retry`, {method: "POST"}); },
+    async run(): Promise<{scheduled:boolean;advanced?:boolean}> { return request<{scheduled:boolean;advanced?:boolean}>("/jobs/run", {method:"POST"}); },
     async list(courseId?: number): Promise<ProcessingJob[]> {
       const q = courseId ? `?course_id=${courseId}` : "";
       const jobs = await request<ProcessingJob[]>(`/jobs${q}`);
       if (jobs.some((job) => job.status === "PENDING" || job.status === "PROCESSING")) {
-        void request("/jobs/run", {method:"POST"}).catch(() => {});
+        void api.jobs.run().catch(() => {});
       }
       return jobs;
     },

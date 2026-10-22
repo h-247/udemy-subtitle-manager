@@ -64,7 +64,10 @@ for(const path of ['courses/import','courses/3/sync','subtitles/process','subtit
   assert.equal(response.status,202);
 }
 await Promise.all(tasks);assert.equal(resumes,6);
+const scheduledOnlyResponse=await worker.fetch(new Request('https://site.example/api/courses/import',{method:'POST',headers:{'oai-authenticated-user-id':'trusted-user','x-job-scheduled-only':'runner-secret'}}),{JOB_RUNNER_SECRET:'runner-secret'},ctx);
+assert.equal(scheduledOnlyResponse.status,202);
+assert.equal(tasks.length,6,'the protected scheduled-only acceptance header suppresses inline processing');
 await worker.fetch(new Request('https://site.example/api/jobs',{headers:{'oai-authenticated-user-id':'trusted-user'}}),{},ctx);
 await worker.fetch(new Request('https://site.example/api/jobs/run',{method:'POST'}),{},ctx);
 assert.equal(resumes,6,'GET reads and anonymous calls cannot start jobs');
-console.log('PASS: immediate background dispatch after authenticated enqueue/resume POST, waitUntil ownership, read-only GET and anonymous isolation');
+console.log('PASS: immediate background dispatch after authenticated enqueue/resume POST, protected scheduled-only acceptance path, read-only GET and anonymous isolation');

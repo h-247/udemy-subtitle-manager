@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 const timestamp = (name: string) => text(name).notNull().default(sql`CURRENT_TIMESTAMP`);
 
@@ -45,7 +45,7 @@ export const sections = sqliteTable("sections", {
   courseId: integer("course_id").notNull().references(() => courses.id, { onDelete: "cascade" }),
   title: text("title").notNull(),
   position: integer("position").notNull().default(1),
-});
+}, (table) => [index("sections_course_position_idx").on(table.courseId, table.position, table.id)]);
 
 export const lectures = sqliteTable("lectures", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -61,7 +61,11 @@ export const lectures = sqliteTable("lectures", {
   captionsJson: text("captions_json").notNull().default("[]"),
   createdAt: timestamp("created_at"),
   updatedAt: timestamp("updated_at"),
-}, (table) => [uniqueIndex("lectures_section_uid_idx").on(table.sectionId, table.lectureId)]);
+}, (table) => [
+  uniqueIndex("lectures_section_uid_idx").on(table.sectionId, table.lectureId),
+  index("lectures_section_status_order_idx").on(table.sectionId, table.learningStatus, table.position, table.id),
+  index("lectures_section_type_idx").on(table.sectionId, table.lectureType, table.learningStatus),
+]);
 
 export const subtitles = sqliteTable("subtitles", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -80,7 +84,10 @@ export const subtitles = sqliteTable("subtitles", {
   lastProcessedAt: text("last_processed_at"),
   createdAt: timestamp("created_at"),
   updatedAt: timestamp("updated_at"),
-}, (table) => [uniqueIndex("subtitles_lecture_language_idx").on(table.lectureId, table.language)]);
+}, (table) => [
+  uniqueIndex("subtitles_lecture_language_idx").on(table.lectureId, table.language),
+  index("subtitles_lecture_status_idx").on(table.lectureId, table.status, table.driveStatus),
+]);
 
 export const processingJobs = sqliteTable("processing_jobs", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -110,4 +117,15 @@ export const jobLeases = sqliteTable("job_leases", {
   userId: integer("user_id").primaryKey().references(() => users.id, {onDelete:"cascade"}),
   token: text("token").notNull(),
   expiresAt: integer("expires_at").notNull(),
+});
+
+export const dispatcherStatus = sqliteTable("dispatcher_status", {
+  id: integer("id").primaryKey(),
+  runId: text("run_id"),
+  status: text("status").notNull().default("NEVER_RUN"),
+  lastStartedAt: text("last_started_at"),
+  heartbeatAt: text("heartbeat_at"),
+  lastFinishedAt: text("last_finished_at"),
+  advanced: integer("advanced").notNull().default(0),
+  errorMessage: text("error_message"),
 });

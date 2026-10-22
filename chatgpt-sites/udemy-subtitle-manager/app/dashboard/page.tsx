@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "../lib/auth";
 import { api } from "../lib/api";
-import { Course, ProcessingJob, formatUdemyUrl } from "../types";
+import { Course, ProcessingJob, RuntimeHealth, formatUdemyUrl } from "../types";
 import CourseTags from "../components/CourseTags";
 import NextLectureCard from "../components/NextLectureCard";
 import Navbar from "../components/Navbar";
@@ -42,9 +42,12 @@ function CoursesListContent() {
   const [coursesLoading, setCoursesLoading] = useState(true);
   const [tagFilter, setTagFilter] = useState("all");
   const [courseSearch, setCourseSearch] = useState("");
+  const [coursePage, setCoursePage] = useState(1);
+  const coursesPerPage = 20;
 
   // Active Jobs state
   const [jobs, setJobs] = useState<ProcessingJob[]>([]);
+  const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealth | null>(null);
 
   // Modals
   const [isConnectionsOpen, setIsConnectionsOpen] = useState(false);
@@ -97,8 +100,15 @@ function CoursesListContent() {
     if (!silent) setCoursesLoading(true);
     setCoursesError(null);
     try {
-      const [data, existingTags] = await Promise.all([api.courses.list(), api.courses.tags()]);
-      setCourses(data.items);
+      const [firstPage, existingTags] = await Promise.all([
+        api.courses.list({ page: 1, page_size: 100 }),
+        api.courses.tags(),
+      ]);
+      const pageCount = Math.ceil(firstPage.total / 100);
+      const remainingPages = await Promise.all(Array.from({ length: Math.max(0, pageCount - 1) }, (_, index) =>
+        api.courses.list({ page: index + 2, page_size: 100 }),
+      ));
+      setCourses([firstPage, ...remainingPages].flatMap((page) => page.items));
       setExistingCourseTags(existingTags);
     } catch (err) {
       setCoursesError(err instanceof Error ? err.message : "Failed to load courses.");
@@ -109,12 +119,10 @@ function CoursesListContent() {
   }, []);
 
   const loadJobs = useCallback(async () => {
-    try {
-      const activeJobs = await api.jobs.list();
-      setJobs(activeJobs);
-    } catch (err) {
-      console.error("Failed to load jobs:", err);
-    }
+    const [jobsResult, healthResult] = await Promise.allSettled([api.jobs.list(), api.health()]);
+    if (jobsResult.status === "fulfilled") setJobs(jobsResult.value);
+    else console.error("Failed to load jobs:", jobsResult.reason);
+    if (healthResult.status === "fulfilled") setRuntimeHealth(healthResult.value);
   }, []);
 
   useEffect(() => {
@@ -158,6 +166,16 @@ function CoursesListContent() {
     }
   };
 
+  const handleWakeJobs = async () => {
+    try {
+      const result = await api.jobs.run();
+      setToastMessage(result.advanced ? "Advanced saved job progress." : "No runnable job is ready. Saved progress remains queued.");
+      await loadJobs();
+    } catch (err) {
+      setToastMessage(err instanceof Error ? err.message : "Could not start the dispatcher.");
+    }
+  };
+
   const tagOptions = existingCourseTags;
   const filteredCourses = courses.filter((c) => {
     if (tagFilter === "untagged" && c.tags.length) return false;
@@ -169,6 +187,14 @@ function CoursesListContent() {
       (c.instructor && c.instructor.toLowerCase().includes(q)) || c.tags.some((tag) => tag.toLowerCase().includes(q))
     );
   });
+  const pageCount = Math.max(1, Math.ceil(filteredCourses.length / coursesPerPage));
+  const visibleCourses = filteredCourses.slice((coursePage - 1) * coursesPerPage, coursePage * coursesPerPage);
+  const firstVisibleCourse = filteredCourses.length ? (coursePage - 1) * coursesPerPage + 1 : 0;
+  const lastVisibleCourse = Math.min(coursePage * coursesPerPage, filteredCourses.length);
+
+  useEffect(() => {
+    if (coursePage > pageCount) setCoursePage(pageCount);
+  }, [coursePage, pageCount]);
 
   return (
     <div className="min-h-screen bg-[#212121] text-[#ECECEC] flex flex-col font-sans">
@@ -202,23 +228,23 @@ function CoursesListContent() {
         )}
 
         {/* Active background jobs bar */}
-        <JobProgressBar jobs={jobs} onCancelJob={handleCancelJob} onReconnect={() => setIsConnectionsOpen(true)} />
+        <JobProgressBar jobs={jobs} dispatcher={runtimeHealth?.dispatcher ?? null} runtimeStatus={runtimeHealth?.status} queueHealth={runtimeHealth?.queue} onCancelJob={handleCancelJob} onReconnect={() => setIsConnectionsOpen(true)} onWake={handleWakeJobs} />
 
         <div className="flex flex-wrap items-center justify-between gap-3">
           {courses.length > 0 && <div className="flex flex-wrap items-center gap-2 text-xs">
             <label htmlFor="filter-course-tags" className="text-[#A3A3A3]">Filter by tag</label>
-            <select id="filter-course-tags" value={tagFilter} onChange={(event) => setTagFilter(event.target.value)} className="px-3 py-2 rounded-full bg-[#262626] border border-[#383838]">
+            <select id="filter-course-tags" value={tagFilter} onChange={(event) => { setTagFilter(event.target.value); setCoursePage(1); }} className="px-3 py-2 rounded-full bg-[#262626] border border-[#383838]">
               <option value="all">All tags</option>
               <option value="untagged">Untagged</option>
               {tagFilter.startsWith("tag:") && !tagOptions.some((tag) => `tag:${tag.toLowerCase()}` === tagFilter) && <option value={tagFilter}>{tagFilter.slice(4)}</option>}
               {tagOptions.map((tag) => <option key={tag.toLowerCase()} value={`tag:${tag.toLowerCase()}`}>{tag}</option>)}
             </select>
-            {(tagFilter !== "all" || courseSearch) && <button onClick={() => { setTagFilter("all"); setCourseSearch(""); }} className="underline text-[#A3A3A3] hover:text-white">Clear filters</button>}
+            {(tagFilter !== "all" || courseSearch) && <button onClick={() => { setTagFilter("all"); setCourseSearch(""); setCoursePage(1); }} className="underline text-[#A3A3A3] hover:text-white">Clear filters</button>}
           </div>}
           <div className="flex items-center gap-2 w-full sm:w-auto sm:ml-auto">
             {courses.length > 0 && <div className="relative flex-1 sm:w-[360px]">
               <Search className="w-4 h-4 text-[#A3A3A3] absolute left-3 top-2.5" />
-              <input aria-label="Search courses" type="search" placeholder="Search courses, instructors or tags..." value={courseSearch} onChange={(event) => setCourseSearch(event.target.value)} className="w-full pl-9 pr-3 py-2 bg-[#1A1A1A] border border-[#383838] rounded-xl text-xs text-[#ECECEC] placeholder-[#737373] focus:outline-none focus:border-white" />
+              <input aria-label="Search courses" type="search" placeholder="Search courses, instructors or tags..." value={courseSearch} onChange={(event) => { setCourseSearch(event.target.value); setCoursePage(1); }} className="w-full pl-9 pr-3 py-2 bg-[#1A1A1A] border border-[#383838] rounded-xl text-xs text-[#ECECEC] placeholder-[#737373] focus:outline-none focus:border-white" />
             </div>}
             <button onClick={() => loadCourses()} title="Refresh courses" className="p-2 bg-[#262626] hover:bg-[#333333] border border-[#383838] rounded-xl"><RefreshCw className="w-4 h-4" /></button>
           </div>
@@ -256,8 +282,9 @@ function CoursesListContent() {
             No courses match the current search and tag filter.
           </div>
         ) : (
+          <>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-x-4 gap-y-8 items-start">
-            {filteredCourses.map((course) => {
+            {visibleCourses.map((course) => {
               const completedPercent =
                 course.total_lectures > 0
                   ? Math.round((course.completed_lectures / course.total_lectures) * 100)
@@ -342,7 +369,7 @@ function CoursesListContent() {
                   </div>
 
                   <div className="mt-2">
-                    <CourseTags tags={course.tags} onSelect={(tag) => setTagFilter(`tag:${tag.toLowerCase()}`)} />
+                    <CourseTags tags={course.tags} onSelect={(tag) => { setTagFilter(`tag:${tag.toLowerCase()}`); setCoursePage(1); }} />
                   </div>
                   {/* Bottom Footer & CTA */}
                   <div className="pt-2 mt-2 border-t border-[#333333] space-y-1">
@@ -382,6 +409,15 @@ function CoursesListContent() {
               );
             })}
           </div>
+          {filteredCourses.length > coursesPerPage && <nav aria-label="Course pages" className="flex items-center justify-between gap-3 border-t border-[#333333] pt-4 text-xs text-[#A3A3A3]">
+            <span>Showing {firstVisibleCourse}–{lastVisibleCourse} of {filteredCourses.length} courses</span>
+            <div className="flex items-center gap-3">
+              <button type="button" aria-label="Previous course page" disabled={coursePage === 1} onClick={() => setCoursePage((page) => Math.max(1, page - 1))} className="px-3 py-2 rounded-lg border border-[#383838] disabled:opacity-40 disabled:cursor-not-allowed hover:bg-[#333333]">Previous</button>
+              <span aria-live="polite">Page {coursePage} of {pageCount}</span>
+              <button type="button" aria-label="Next course page" disabled={coursePage >= pageCount} onClick={() => setCoursePage((page) => Math.min(pageCount, page + 1))} className="px-3 py-2 rounded-lg border border-[#383838] disabled:opacity-40 disabled:cursor-not-allowed hover:bg-[#333333]">Next</button>
+            </div>
+          </nav>}
+          </>
         )}
       </main>
 

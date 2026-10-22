@@ -444,7 +444,7 @@ function CourseContentDetail() {
         </div>
 
         {/* Active background jobs bar */}
-        <JobProgressBar jobs={jobs} onCancelJob={handleCancelJob} onReconnect={() => setIsConnectionsOpen(true)} />
+        <JobProgressBar jobs={jobs} onCancelJob={handleCancelJob} onReconnect={() => setIsConnectionsOpen(true)} onWake={async () => { await api.jobs.run(); void loadJobs(); }} />
 
         {/* Course Hero & Controls */}
         <div className="p-6 bg-[#262626] border border-[#333333] rounded-2xl shadow-sm space-y-6">

@@ -1,0 +1,53 @@
+name: Opt-in hosted import acceptance
+on:
+  workflow_dispatch:
+    inputs:
+      course_url:
+        description: Real Udemy course URL to import using the configured test account
+        required: true
+        type: string
+      drive_retry_course_id:
+        description: Existing course ID with a completed caption and failed Drive upload
+        required: true
+        type: string
+      expected_commit:
+        description: Deployed source commit to verify
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  hosted-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: chatgpt-sites/udemy-subtitle-manager/package-lock.json
+      - working-directory: chatgpt-sites/udemy-subtitle-manager
+        run: npm ci
+      - working-directory: chatgpt-sites/udemy-subtitle-manager
+        run: npx playwright install --with-deps chromium
+      - name: Run hosted import, reconnection, and Drive retry acceptance
+        working-directory: chatgpt-sites/udemy-subtitle-manager
+        run: npm run test:hosted-acceptance
+        env:
+          SITE_URL: https://udemy-subtitle-manager.h-247.chatgpt.site
+          SITE_SERVICE_TOKEN: ${{ secrets.SITE_SERVICE_TOKEN }}
+          JOB_RUNNER_SECRET: ${{ secrets.JOB_RUNNER_SECRET }}
+          HOSTED_USER_ID: ${{ secrets.HOSTED_USER_ID }}
+          HOSTED_USER_EMAIL: ${{ secrets.HOSTED_USER_EMAIL }}
+          HOSTED_TEST_EXPIRED_UDEMY_COOKIE_TEXT: ${{ secrets.HOSTED_TEST_EXPIRED_UDEMY_COOKIE_TEXT }}
+          HOSTED_TEST_UDEMY_COOKIE_TEXT: ${{ secrets.HOSTED_TEST_UDEMY_COOKIE_TEXT }}
+          COURSE_URL: ${{ inputs.course_url }}
+          DRIVE_RETRY_COURSE_ID: ${{ inputs.drive_retry_course_id }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hosted-acceptance-${{ inputs.expected_commit }}-${{ github.run_id }}
+          path: chatgpt-sites/udemy-subtitle-manager/artifacts/hosted-acceptance.json
+          if-no-files-found: error
