@@ -1,16 +1,5 @@
 ## 2026-10-21 ChatGPT Sites release
 
-Pending verification for the next release: the release snapshot regression now
-requires hosting configuration from the selected Git commit, isolates working-tree
-configuration drift, and rejects missing, invalid, or tampered configuration.
-The CI matrix runs installation, local migrations, typecheck, build, unit,
-production Worker and Chromium suites on Windows and Linux. Recovery suites now
-include API curriculum import, automatic subtitle transition, expired session,
-cookie reconnection and a persisted Worker restart; the browser scenario closes
-the importing page and reopens the dashboard. Udemy and Drive HTTP responses in
-these suites are fixtures. Passing these checks does not constitute a live hosted
-recovery check. Record that separately before declaring the next release verified.
-
 - Site version: 21
 - Sites source commit: `ae34174408fa5e44edab4088ff2473610b1f9e73`
 - Deployment ID: `appgdep_6ad84bd869448191b9648159604d69a8`
@@ -18,6 +7,19 @@ recovery check. Record that separately before declaring the next release verifie
 - Deployment status: `succeeded`; existing owner-only access preserved.
 - Verified: local D1 migrations 0000–0002, TypeScript typecheck, Vitest and repository regression scripts, production Vinext build. The built API worker contains the exact Sites source commit above.
 - Browser E2E: blocked by the local Vite server bind failure (`EACCES` on `127.0.0.1:5173`). Release checks now run browser flows against the built Worker under workerd and retain Playwright traces on failure; this release predates that requirement.
+
+## 2026-10-22 shared application baseline
+
+- Tested root commit: `b1fbd68facd00780bfa6b3763bd751744f5e083d` ([Release checks](https://github.com/h-247/udemy-subtitle-manager/actions/runs/39646635413), Ubuntu and Windows jobs passed).
+- Sites source commit: `53fe8ebdac8e8ed37c316586d06f9ce73af78051`; `.openai/release.json` records the tested root commit above.
+- Site version: 30; deployment ID: `appgdep_6ad99abcec4481918f75d6e2979b039f`.
+- URL: https://udemy-subtitle-manager.h-247.chatgpt.site (owner-only audience preserved).
+- Release snapshot integrity test passed with committed hosting configuration, working-tree drift, missing/invalid configuration, tampering, rename/deletion and binary-file cases.
+- A fresh Windows checkout installed 711 packages, applied migrations 0000–0002 and passed typecheck. The production build, unit/regression tests, workerd runtime recovery and all five Chromium flows passed in both the fresh working checkout and GitHub CI. Windows local preview returned HTTP 200 for `/dashboard` and `/api/health`.
+- Recovery coverage now submits a real application import request, reads fixture curriculum, hands the job to automatic subtitle processing, expires the Udemy session, closes the browser, restarts the Worker, reconnects, and resumes the checkpoint. A Drive-only retry test confirms one caption download and one upload across retry.
+- Hosted `/api/health`, accessed through the Site's owner gate, returned `status: ok` and the exact tested root commit. The protected [hosted dispatcher run](https://github.com/h-247/udemy-subtitle-manager/actions/runs/39726715929) also succeeded after deployment and reported zero pending user job steps. This confirms hosted reachability and dispatcher authorization; the hosted Site had no queued job to exercise a production recovery checkpoint.
+
+Hosting configuration is materialized only from the selected Git commit. The release test rejects working-tree configuration drift and rejects snapshots with missing, invalid or modified hosting configuration. The CI matrix runs install, local migrations, unit and repository regressions, typecheck, build, workerd recovery and Chromium E2E on Windows and Linux. Udemy and Drive responses in automated recovery tests use fixtures; the hosted dispatcher check does not create synthetic production records.
 
 The authoritative application source for local and hosted use is `chatgpt-sites/udemy-subtitle-manager`. `sites/udemy-subtitle-manager` is an ignored Sites Git checkout used only to publish a tested snapshot. Do not develop independently in that checkout. The old Python backend and `frontend` directories are retained legacy code; launchers and current documentation use the shared Vinext Worker application.
 
