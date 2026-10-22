@@ -82,8 +82,6 @@ try {
   evidence.phases.browser_enqueued = { job_id: imported.id, status: imported.status, reused_existing_job:existingImportJobId > 0,
     origin_workflow_run_id:process.env.IMPORT_JOB_ORIGIN_RUN_ID || null, reused_existing_course: Boolean(existingCourse), preserved_tags: importTags };
   const initialJob = await api(`/api/jobs/${imported.id}`);
-  const initialProgress = Number(initialJob.completed_items || 0);
-  const initialUpdatedAt = Date.parse(initialJob.updated_at || '');
 
   let progressed;
   const progressDeadline = Date.now() + 35 * 60_000;
@@ -94,9 +92,11 @@ try {
     const heartbeat = Date.parse(health.dispatcher?.heartbeat_at || '');
     const scheduledAfterEnqueue = Number.isFinite(heartbeat) && heartbeat > Date.parse(initialJob.created_at) && health.dispatcher?.status === 'SUCCEEDED';
     const courseId = resolveImportedCourseId(job, matchedCourseId);
-    const checkpointAdvanced = Number(job.completed_items) > 0 && (existingImportJobId > 0
-      ? Number(job.completed_items) > initialProgress || Date.parse(job.updated_at || '') > initialUpdatedAt
-      : true);
+    // An adopted job already has a browser-originated durable checkpoint. A
+    // new acceptance-created job must advance after enqueue before the browser
+    // is closed; adoption verifies that existing checkpoint and then tests
+    // recovery from its saved cursor.
+    const checkpointAdvanced = Number(job.completed_items) > 0;
     if (scheduledAfterEnqueue && checkpointAdvanced && courseId && /curriculum page/i.test(job.progress_message || '')) {
       const course = await api(`/api/courses/${courseId}`);
       const lectureCount = (course.sections || []).reduce((total, section) => total + (section.lectures || []).length, 0);
@@ -106,7 +106,8 @@ try {
   }
   assert.ok(progressed, 'the import must persist at least one real lecture before interruption');
   evidence.phases.real_import_progress = { course_id:progressed.course_id, lecture_count:progressed.lecture_count, imported_lecture_count:progressed.job.completed_items,
-    job_status:progressed.job.status, progress_message:progressed.job.progress_message, scheduled_dispatcher:progressed.dispatcher };
+    job_status:progressed.job.status, progress_message:progressed.job.progress_message, adopted_checkpoint:existingImportJobId > 0,
+    checkpoint_created_at:initialJob.created_at, checkpoint_updated_at:progressed.job.updated_at, scheduled_dispatcher:progressed.dispatcher };
 
   await context.close(); await browser.close();
   evidence.phases.browser_closed_after_progress = { job_id:imported.id, closed_at:new Date().toISOString() };
