@@ -4,12 +4,11 @@ import { chromium } from '@playwright/test';
 import { buildExpiredCookieText } from './hosted-acceptance-helpers.mjs';
 
 const origin = new URL(process.env.SITE_URL).origin;
-const required = ['SITE_SERVICE_TOKEN','JOB_RUNNER_SECRET','HOSTED_USER_ID','HOSTED_USER_EMAIL','HOSTED_TEST_UDEMY_COOKIE_TEXT','DRIVE_RETRY_COURSE_ID'];
+const required = ['SITE_SERVICE_TOKEN','JOB_RUNNER_SECRET','HOSTED_ACCEPTANCE_SECRET','HOSTED_TEST_UDEMY_COOKIE_TEXT','DRIVE_RETRY_COURSE_ID'];
 for (const key of required) if (!process.env[key]) throw new Error(`Missing required hosted acceptance secret/input: ${key}`);
 const headers = {
-  'oai-authenticated-user-id': process.env.HOSTED_USER_ID,
-  'oai-authenticated-user-email': process.env.HOSTED_USER_EMAIL,
   'OAI-Sites-Authorization': `Bearer ${process.env.SITE_SERVICE_TOKEN || ''}`,
+  'x-hosted-acceptance-secret': process.env.HOSTED_ACCEPTANCE_SECRET || '',
   'x-job-scheduled-only': process.env.JOB_RUNNER_SECRET || '',
   'Content-Type': 'application/json',
 };

@@ -38,8 +38,7 @@ jobs:
           SITE_URL: https://udemy-subtitle-manager.h-247.chatgpt.site
           SITE_SERVICE_TOKEN: ${{ secrets.SITE_SERVICE_TOKEN }}
           JOB_RUNNER_SECRET: ${{ secrets.JOB_RUNNER_SECRET }}
-          HOSTED_USER_ID: ${{ secrets.HOSTED_USER_ID }}
-          HOSTED_USER_EMAIL: ${{ secrets.HOSTED_USER_EMAIL }}
+          HOSTED_ACCEPTANCE_SECRET: ${{ secrets.HOSTED_ACCEPTANCE_SECRET }}
           HOSTED_TEST_UDEMY_COOKIE_TEXT: ${{ secrets.HOSTED_TEST_UDEMY_COOKIE_TEXT }}
           COURSE_URL: ${{ inputs.course_url }}
           DRIVE_RETRY_COURSE_ID: ${{ inputs.drive_retry_course_id }}

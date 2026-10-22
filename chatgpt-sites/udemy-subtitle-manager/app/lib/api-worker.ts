@@ -4,6 +4,7 @@ import { loadCourseRows, loadCourseSummaries } from "./course-reader";
 import { env } from "cloudflare:workers";
 import { getDb, type SitesDatabase } from "../../db";
 import { getChatGPTUser } from "../chatgpt-auth";
+import { hostedAcceptanceUserId } from "./hosted-acceptance-policy.mjs";
 import { courseImportSchema, lectureUpdateSchema, requestObjectSchema, subtitleProcessSchema } from "./api-validation";
 import { z } from "zod";
 
@@ -54,15 +55,27 @@ class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
-async function currentUser(): Promise<UserRow> {
+async function currentUser(request: Request, path: string[]): Promise<UserRow> {
   const identity = await getChatGPTUser();
-  if (!identity) throw new ApiError(401, "Sign in to ChatGPT to use this Site.");
   const database = db();
-  await database.prepare(`INSERT INTO users (platform_user_id,email,is_active) VALUES (?,?,1)
-    ON CONFLICT(platform_user_id) DO UPDATE SET email=excluded.email,updated_at=CURRENT_TIMESTAMP`)
-    .bind(identity.userId, identity.email).run();
-  const user = await database.prepare("SELECT * FROM users WHERE platform_user_id=? AND is_active=1")
-    .bind(identity.userId).first<UserRow>();
+  let user: UserRow | null;
+  if (identity) {
+    await database.prepare(`INSERT INTO users (platform_user_id,email,is_active) VALUES (?,?,1)
+      ON CONFLICT(platform_user_id) DO UPDATE SET email=excluded.email,updated_at=CURRENT_TIMESTAMP`)
+      .bind(identity.userId, identity.email).run();
+    user = await database.prepare("SELECT * FROM users WHERE platform_user_id=? AND is_active=1")
+      .bind(identity.userId).first<UserRow>();
+  } else {
+    const acceptanceUserId = hostedAcceptanceUserId({
+      method: request.method, path: path.join("/"), suppliedSecret: request.headers.get("x-hosted-acceptance-secret"),
+      expectedSecret: (env as any).HOSTED_ACCEPTANCE_SECRET, userId: (env as any).HOSTED_ACCEPTANCE_USER_ID,
+    });
+    if (!acceptanceUserId) {
+      throw new ApiError(401, "Sign in to ChatGPT to use this Site.");
+    }
+    user = await database.prepare("SELECT * FROM users WHERE platform_user_id=? AND is_active=1")
+      .bind(acceptanceUserId).first<UserRow>();
+  }
   if (!user) throw new ApiError(401, "Your ChatGPT account is not active for this Site.");
   await normalizeDriveCredentials(user);
   return user;
@@ -1295,7 +1308,7 @@ async function api(request: Request) {
       .bind(crypto.randomUUID(),detail).run();
     return json({recorded:true});
   }
-  const user = await currentUser();
+  const user = await currentUser(request, path);
   if (path[0] === "auth" && path[1] === "me" && method === "GET") return json(await apiUserProfile(user));
   if (path[0] === "auth" && path[1] === "logout" && method === "POST") return json({ message: "Signed out from ChatGPT." });
   if (path[0] === "auth" && ["login", "register"].includes(path[1] || "")) return fail("This Site uses your ChatGPT sign-in; account passwords are managed by ChatGPT.", 410);
