@@ -1,3 +1,12 @@
+## 2026-10-22 pagination and dispatcher recovery release
+
+- Tested root commit: `5a13b74cfb813d8a0e5f349ebae2d743436073fc` ([Release checks](https://github.com/h-247/udemy-subtitle-manager/actions/runs/39803809063), Windows and Linux Sites jobs and backend tests passed).
+- Sites source commit: `0f03184ad1d146a351e01c2450be6709f102e75e`; `.openai/release.json` records the tested root commit above.
+- Site version: 31; deployment ID: `appgdep_6ada2c9fc0788191a89c024ed3f65253`; status: `succeeded`.
+- URL: https://udemy-subtitle-manager.h-247.chatgpt.site (owner-only access preserved).
+- The deployed D1 schema includes migration 0003's `dispatcher_status` table. Hosted dispatcher run [39806000369](https://github.com/h-247/udemy-subtitle-manager/actions/runs/39806000369) succeeded after deployment; D1 recorded a `SUCCEEDED` run with heartbeat at `2026-10-22 15:33:54`, `advanced=0`, and no error.
+- Hosted import, browser-closed progression, session reconnection, and Drive retry acceptance remains unverified: GitHub Actions currently has `SITE_SERVICE_TOKEN` and `JOB_RUNNER_SECRET`, but lacks `HOSTED_USER_ID`, `HOSTED_USER_EMAIL`, `HOSTED_TEST_EXPIRED_UDEMY_COOKIE_TEXT`, and `HOSTED_TEST_UDEMY_COOKIE_TEXT`. The opt-in workflow requires these test-account values to run against real Udemy and Drive data.
+
 ## 2026-10-21 ChatGPT Sites release
 
 - Site version: 21
