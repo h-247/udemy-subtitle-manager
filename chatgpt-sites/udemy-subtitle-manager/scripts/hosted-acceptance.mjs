@@ -30,7 +30,7 @@ async function waitForScheduledJob(id, predicate, scheduledAfter, timeoutMs = 35
     const health = await api('/api/health');
     const job = await api(`/api/jobs/${id}`);
     const heartbeat = Date.parse(health.dispatcher?.heartbeat_at || '');
-    if (Number.isFinite(heartbeat) && heartbeat > scheduledAfter && health.dispatcher.status === 'SUCCEEDED' && health.dispatcher.advanced > 0 && predicate(job)) {
+    if (Number.isFinite(heartbeat) && heartbeat > scheduledAfter && health.dispatcher.status === 'SUCCEEDED' && Date.parse(job.updated_at) > scheduledAfter && predicate(job)) {
       return { job, dispatcher: health.dispatcher };
     }
     if (['FAILED','CANCELLED'].includes(job.status)) throw new Error(`Job ${id} ended as ${job.status}: ${job.error_message || ''}`);
@@ -82,6 +82,8 @@ try {
   evidence.phases.browser_enqueued = { job_id: imported.id, status: imported.status, reused_existing_job:existingImportJobId > 0,
     origin_workflow_run_id:process.env.IMPORT_JOB_ORIGIN_RUN_ID || null, reused_existing_course: Boolean(existingCourse), preserved_tags: importTags };
   const initialJob = await api(`/api/jobs/${imported.id}`);
+  const initialProgress = Number(initialJob.completed_items || 0);
+  const initialUpdatedAt = Date.parse(initialJob.updated_at || '');
 
   let progressed;
   const progressDeadline = Date.now() + 35 * 60_000;
@@ -90,9 +92,12 @@ try {
     const job = await api(`/api/jobs/${imported.id}`);
     if (['FAILED','CANCELLED'].includes(job.status)) throw new Error(`Job ${imported.id} ended as ${job.status}: ${job.error_message || ''}`);
     const heartbeat = Date.parse(health.dispatcher?.heartbeat_at || '');
-    const scheduledAfterEnqueue = Number.isFinite(heartbeat) && heartbeat > Date.parse(initialJob.created_at) && health.dispatcher?.advanced > 0;
+    const scheduledAfterEnqueue = Number.isFinite(heartbeat) && heartbeat > Date.parse(initialJob.created_at) && health.dispatcher?.status === 'SUCCEEDED';
     const courseId = resolveImportedCourseId(job, matchedCourseId);
-    if (scheduledAfterEnqueue && courseId && Number(job.completed_items) > 0 && /curriculum page/i.test(job.progress_message || '')) {
+    const checkpointAdvanced = Number(job.completed_items) > 0 && (existingImportJobId > 0
+      ? Number(job.completed_items) > initialProgress || Date.parse(job.updated_at || '') > initialUpdatedAt
+      : true);
+    if (scheduledAfterEnqueue && checkpointAdvanced && courseId && /curriculum page/i.test(job.progress_message || '')) {
       const course = await api(`/api/courses/${courseId}`);
       const lectureCount = (course.sections || []).reduce((total, section) => total + (section.lectures || []).length, 0);
       if (lectureCount > 0) { progressed = { job, lecture_count:lectureCount, course_id:courseId, dispatcher:health.dispatcher }; break; }
