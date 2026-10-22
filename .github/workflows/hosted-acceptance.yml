@@ -40,7 +40,6 @@ jobs:
           JOB_RUNNER_SECRET: ${{ secrets.JOB_RUNNER_SECRET }}
           HOSTED_USER_ID: ${{ secrets.HOSTED_USER_ID }}
           HOSTED_USER_EMAIL: ${{ secrets.HOSTED_USER_EMAIL }}
-          HOSTED_TEST_EXPIRED_UDEMY_COOKIE_TEXT: ${{ secrets.HOSTED_TEST_EXPIRED_UDEMY_COOKIE_TEXT }}
           HOSTED_TEST_UDEMY_COOKIE_TEXT: ${{ secrets.HOSTED_TEST_UDEMY_COOKIE_TEXT }}
           COURSE_URL: ${{ inputs.course_url }}
           DRIVE_RETRY_COURSE_ID: ${{ inputs.drive_retry_course_id }}

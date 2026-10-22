@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { chromium } from '@playwright/test';
+import { buildExpiredCookieText } from './hosted-acceptance-helpers.mjs';
 
 const origin = new URL(process.env.SITE_URL).origin;
-const required = ['SITE_SERVICE_TOKEN','JOB_RUNNER_SECRET','HOSTED_USER_ID','HOSTED_USER_EMAIL','HOSTED_TEST_EXPIRED_UDEMY_COOKIE_TEXT','HOSTED_TEST_UDEMY_COOKIE_TEXT','DRIVE_RETRY_COURSE_ID'];
+const required = ['SITE_SERVICE_TOKEN','JOB_RUNNER_SECRET','HOSTED_USER_ID','HOSTED_USER_EMAIL','HOSTED_TEST_UDEMY_COOKIE_TEXT','DRIVE_RETRY_COURSE_ID'];
 for (const key of required) if (!process.env[key]) throw new Error(`Missing required hosted acceptance secret/input: ${key}`);
 const headers = {
   'oai-authenticated-user-id': process.env.HOSTED_USER_ID,
@@ -40,6 +41,11 @@ async function waitForScheduledJob(id, predicate, scheduledAfter, timeoutMs = 35
 }
 function cookiesForm(text) {
   const form = new FormData(); form.set('cookie_text', text); return form;
+}
+function expiredCookieText(courseUrl) {
+  const host = new URL(courseUrl).hostname.toLowerCase();
+  if (!(host === 'udemy.com' || host.endsWith('.udemy.com'))) throw new Error('The acceptance course URL must use a udemy.com host.');
+  return `# Netscape HTTP Cookie File\n#HttpOnly_.${host}\tTRUE\t/\tTRUE\t1\tsession\tcodex-hosted-expired-session\n`;
 }
 try {
   const health = await api('/api/health');
@@ -88,10 +94,10 @@ try {
 
   await context.close(); await browser.close();
   evidence.phases.browser_closed_after_progress = { job_id:imported.id, closed_at:new Date().toISOString() };
-  const expiredSession = await api('/api/udemy/cookies', { method:'POST', body:cookiesForm(process.env.HOSTED_TEST_EXPIRED_UDEMY_COOKIE_TEXT) });
+  const expiredSession = await api('/api/udemy/cookies', { method:'POST', body:cookiesForm(buildExpiredCookieText(process.env.COURSE_URL)) });
   assert.equal(expiredSession.saved, true);
-  assert.equal(expiredSession.status, 'EXPIRED_SESSION', 'expired test cookies must be rejected by Udemy validation');
-  evidence.phases.expired_test_session_installed = { status:expiredSession.status, saved:expiredSession.saved };
+  assert.equal(expiredSession.status, 'EXPIRED_SESSION', 'the synthetic expired session must be rejected by Udemy validation');
+  evidence.phases.expired_test_session_installed = { status:expiredSession.status, saved:expiredSession.saved, source:'synthetic-expired-cookie' };
 
   const expiredAt = Date.now();
   const waitingResult = await waitForScheduledJob(imported.id, job => job.status === 'WAITING_SESSION', expiredAt);

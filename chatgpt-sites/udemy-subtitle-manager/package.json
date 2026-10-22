@@ -20,7 +20,7 @@
     "test:e2e": "playwright test",
     "test:runtime": "node tests/runtime/recovery.mjs",
     "test:hosted-acceptance": "node scripts/hosted-acceptance.mjs",
-    "test": "npm run test:unit && node scripts/test-course-loading.mjs && node scripts/test-course-tags.mjs && node scripts/test-job-recovery.mjs && node scripts/test-caption-recovery.mjs && node scripts/test-cookie-save.mjs"
+    "test": "npm run test:unit && node scripts/test-course-loading.mjs && node scripts/test-course-tags.mjs && node scripts/test-job-recovery.mjs && node scripts/test-caption-recovery.mjs && node scripts/test-cookie-save.mjs && node scripts/test-hosted-acceptance-helpers.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
