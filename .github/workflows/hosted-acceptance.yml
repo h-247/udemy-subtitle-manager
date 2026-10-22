@@ -14,6 +14,14 @@ on:
         description: Deployed source commit to verify
         required: true
         type: string
+      import_job_id:
+        description: Optional in-progress import job created by a prior browser acceptance attempt
+        required: false
+        type: string
+      import_job_origin_run_id:
+        description: Prior hosted acceptance run that created the adopted import job
+        required: false
+        type: string
 permissions:
   contents: read
 jobs:
@@ -43,6 +51,8 @@ jobs:
           COURSE_URL: ${{ inputs.course_url }}
           DRIVE_RETRY_COURSE_ID: ${{ inputs.drive_retry_course_id }}
           EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+          IMPORT_JOB_ID: ${{ inputs.import_job_id }}
+          IMPORT_JOB_ORIGIN_RUN_ID: ${{ inputs.import_job_origin_run_id }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:

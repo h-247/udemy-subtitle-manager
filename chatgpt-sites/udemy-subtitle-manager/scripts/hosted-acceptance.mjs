@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { chromium } from '@playwright/test';
-import { buildExpiredCookieText } from './hosted-acceptance-helpers.mjs';
+import { buildExpiredCookieText, resolveImportedCourseId } from './hosted-acceptance-helpers.mjs';
 
 const origin = new URL(process.env.SITE_URL).origin;
 const required = ['SITE_SERVICE_TOKEN','JOB_RUNNER_SECRET','HOSTED_ACCEPTANCE_SECRET','HOSTED_TEST_UDEMY_COOKIE_TEXT','DRIVE_RETRY_COURSE_ID'];
@@ -66,14 +66,21 @@ try {
   const existingLibrary = await api('/api/courses?page=1&page_size=100');
   const normalizedCoursePath = new URL(process.env.COURSE_URL).pathname.replace(/\/+$/, '');
   const existingCourse = existingLibrary.items?.find(course => new URL(course.url).pathname.replace(/\/+$/, '') === normalizedCoursePath);
+  const matchedCourseId = existingCourse?.id ?? null;
   const importTags = existingCourse?.tags || [];
-  const imported = await page.evaluate(async ({url,tags}) => {
-    const response = await fetch('/api/courses/import', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url,tags}) });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
-    return body;
-  }, {url:process.env.COURSE_URL,tags:importTags});
-  evidence.phases.browser_enqueued = { job_id: imported.id, status: imported.status, reused_existing_course: Boolean(existingCourse), preserved_tags: importTags };
+  const existingImportJobId = Number(process.env.IMPORT_JOB_ID || 0);
+  const imported = existingImportJobId > 0
+    ? await api(`/api/jobs/${existingImportJobId}`)
+    : await page.evaluate(async ({url,tags}) => {
+      const response = await fetch('/api/courses/import', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url,tags}) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+      return body;
+    }, {url:process.env.COURSE_URL,tags:importTags});
+  assert.equal(imported.job_type, 'COURSE_IMPORT', 'the acceptance must track a course import job');
+  if (existingImportJobId > 0) assert.ok(Number(imported.completed_items) > 0, 'an adopted import must already have persisted curriculum progress');
+  evidence.phases.browser_enqueued = { job_id: imported.id, status: imported.status, reused_existing_job:existingImportJobId > 0,
+    origin_workflow_run_id:process.env.IMPORT_JOB_ORIGIN_RUN_ID || null, reused_existing_course: Boolean(existingCourse), preserved_tags: importTags };
   const initialJob = await api(`/api/jobs/${imported.id}`);
 
   let progressed;
@@ -84,10 +91,11 @@ try {
     if (['FAILED','CANCELLED'].includes(job.status)) throw new Error(`Job ${imported.id} ended as ${job.status}: ${job.error_message || ''}`);
     const heartbeat = Date.parse(health.dispatcher?.heartbeat_at || '');
     const scheduledAfterEnqueue = Number.isFinite(heartbeat) && heartbeat > Date.parse(initialJob.created_at) && health.dispatcher?.advanced > 0;
-    if (scheduledAfterEnqueue && job.course_id && Number(job.completed_items) > 0 && /curriculum page/i.test(job.progress_message || '')) {
-      const course = await api(`/api/courses/${job.course_id}`);
+    const courseId = resolveImportedCourseId(job, matchedCourseId);
+    if (scheduledAfterEnqueue && courseId && Number(job.completed_items) > 0 && /curriculum page/i.test(job.progress_message || '')) {
+      const course = await api(`/api/courses/${courseId}`);
       const lectureCount = (course.sections || []).reduce((total, section) => total + (section.lectures || []).length, 0);
-      if (lectureCount > 0) { progressed = { job, lecture_count:lectureCount, course_id:job.course_id, dispatcher:health.dispatcher }; break; }
+      if (lectureCount > 0) { progressed = { job, lecture_count:lectureCount, course_id:courseId, dispatcher:health.dispatcher }; break; }
     }
     await new Promise(resolve => setTimeout(resolve, 10_000));
   }
@@ -105,8 +113,9 @@ try {
   const expiredAt = Date.now();
   const waitingResult = await waitForScheduledJob(imported.id, job => job.status === 'WAITING_SESSION', expiredAt);
   const waiting = waitingResult.job;
-  assert.ok(waiting.course_id, 'the interrupted import must retain its course checkpoint');
-  evidence.phases.expired_session_after_progress = { status:waiting.status, completed_items:waiting.completed_items, progress_message:waiting.progress_message, scheduled_dispatcher:waitingResult.dispatcher };
+  const recoveredCourseId = resolveImportedCourseId(waiting, progressed.course_id);
+  assert.ok(recoveredCourseId, 'the interrupted import must retain or resolve its course checkpoint');
+  evidence.phases.expired_session_after_progress = { status:waiting.status, course_id:recoveredCourseId, completed_items:waiting.completed_items, progress_message:waiting.progress_message, scheduled_dispatcher:waitingResult.dispatcher };
 
   const reconnected = await api('/api/udemy/cookies', { method:'POST', body:cookiesForm(process.env.HOSTED_TEST_UDEMY_COOKIE_TEXT) });
   assert.equal(reconnected.saved, true);
@@ -115,7 +124,7 @@ try {
   const reconnectedAt = Date.now();
   const completedResult = await waitForScheduledJob(imported.id, job => job.status === 'COMPLETED', reconnectedAt);
   const completed = completedResult.job;
-  evidence.phases.import_completed = { status: completed.status, completed_items: completed.completed_items, total_items: completed.total_items, course_id: completed.course_id, scheduled_dispatcher:completedResult.dispatcher };
+  evidence.phases.import_completed = { status: completed.status, completed_items: completed.completed_items, total_items: completed.total_items, course_id: resolveImportedCourseId(completed, recoveredCourseId), scheduled_dispatcher:completedResult.dispatcher };
 
   const courseId = Number(process.env.DRIVE_RETRY_COURSE_ID);
   const before = await api(`/api/courses/${courseId}`);
