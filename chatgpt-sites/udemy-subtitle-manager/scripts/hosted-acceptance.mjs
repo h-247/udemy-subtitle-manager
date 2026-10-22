@@ -64,13 +64,17 @@ try {
   const context = await browser.newContext({ extraHTTPHeaders: headers });
   const page = await context.newPage();
   await page.goto(`${origin}/dashboard`, { waitUntil: 'domcontentloaded' });
-  const imported = await page.evaluate(async url => {
-    const response = await fetch('/api/courses/import', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url}) });
+  const existingLibrary = await api('/api/courses?page=1&page_size=100');
+  const normalizedCoursePath = new URL(process.env.COURSE_URL).pathname.replace(/\/+$/, '');
+  const existingCourse = existingLibrary.items?.find(course => new URL(course.url).pathname.replace(/\/+$/, '') === normalizedCoursePath);
+  const importTags = existingCourse?.tags || [];
+  const imported = await page.evaluate(async ({url,tags}) => {
+    const response = await fetch('/api/courses/import', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url,tags}) });
     const body = await response.json();
     if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
     return body;
-  }, process.env.COURSE_URL);
-  evidence.phases.browser_enqueued = { job_id: imported.id, status: imported.status };
+  }, {url:process.env.COURSE_URL,tags:importTags});
+  evidence.phases.browser_enqueued = { job_id: imported.id, status: imported.status, reused_existing_course: Boolean(existingCourse), preserved_tags: importTags };
   const initialJob = await api(`/api/jobs/${imported.id}`);
 
   let progressed;
