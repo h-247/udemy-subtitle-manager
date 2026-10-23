@@ -11,7 +11,8 @@ test("Worker health route is available without database data", async ({ request 
   expect(response.ok()).toBeTruthy();
   await expect(response).toBeOK();
   expect(await response.json()).toMatchObject({
-    status: "degraded",
+    status: "ok",
     dispatcher: { status: "NEVER_RUN", stale: true },
+    queue: { active_jobs: 0 },
   });
 });
