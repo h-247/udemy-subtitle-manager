@@ -23,6 +23,7 @@ on:
         required: false
         type: string
 permissions:
+  actions: read
   contents: read
 jobs:
   hosted-acceptance:
@@ -53,6 +54,7 @@ jobs:
           EXPECTED_COMMIT: ${{ inputs.expected_commit }}
           IMPORT_JOB_ID: ${{ inputs.import_job_id }}
           IMPORT_JOB_ORIGIN_RUN_ID: ${{ inputs.import_job_origin_run_id }}
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:

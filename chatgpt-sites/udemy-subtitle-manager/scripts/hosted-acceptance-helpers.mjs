@@ -10,3 +10,17 @@ export function resolveImportedCourseId(job, matchedCourseId = null) {
   const matchedId = Number(matchedCourseId);
   return Number.isSafeInteger(matchedId) && matchedId > 0 ? matchedId : null;
 }
+
+export function isScheduledDispatcherEvidence(run, dispatchJob, dispatcherStartedAt, expectedCommit, after) {
+  if (run?.event !== 'schedule' || run?.status !== 'completed' || run?.conclusion !== 'success') return false;
+  if (expectedCommit && run?.head_sha !== expectedCommit) return false;
+  if (dispatchJob?.name !== 'dispatch' || dispatchJob?.status !== 'completed' || dispatchJob?.conclusion !== 'success') return false;
+  const createdAt = Date.parse(run?.created_at || '');
+  const startedAt = Date.parse(dispatchJob?.started_at || '');
+  const completedAt = Date.parse(dispatchJob?.completed_at || '');
+  const dispatcherAt = Date.parse(dispatcherStartedAt || '');
+  return [createdAt, startedAt, completedAt, dispatcherAt, after].every(Number.isFinite)
+    && createdAt > after
+    && startedAt <= dispatcherAt + 5_000
+    && completedAt + 30_000 >= dispatcherAt;
+}
