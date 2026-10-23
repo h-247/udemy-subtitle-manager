@@ -1,7 +1,7 @@
 name: Hosted job dispatcher
 on:
   schedule:
-    - cron: '2-59/5 * * * *'
+    - cron: '3-59/5 * * * *'
   workflow_dispatch:
 permissions:
   contents: read
