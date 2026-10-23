@@ -12,7 +12,7 @@ interface JobProgressBarProps {
   onWake: () => void;
   dispatcher?: DispatcherHealth | null;
   runtimeStatus?: string;
-  queueHealth?: { oldest_queued_at: string | null; oldest_queued_age_seconds: number; runnable_jobs: number; overdue_runnable_jobs: number; stalled_jobs: number };
+  queueHealth?: { oldest_queued_at: string | null; oldest_queued_age_seconds: number; active_jobs: number; runnable_jobs: number; overdue_runnable_jobs: number; stalled_jobs: number };
 }
 
 export default function JobProgressBar({ jobs, onCancelJob, onReconnect, onWake, dispatcher, runtimeStatus, queueHealth }: JobProgressBarProps) {
@@ -28,7 +28,7 @@ export default function JobProgressBar({ jobs, onCancelJob, onReconnect, onWake,
         <div><p className="text-sm font-semibold text-rose-200">{dispatcherFailed ? "Last background dispatcher run failed" : queuedWorkStalled ? "Runnable background jobs are overdue" : "Background dispatcher heartbeat is missing or stale"}</p>
           <p className="text-xs text-rose-200/80">{dispatcher?.error || (queuedWorkStalled ? `${queueHealth?.overdue_runnable_jobs ?? queueHealth?.stalled_jobs ?? 0} runnable job(s) have had no progress for at least 15 minutes. Saved checkpoints are retained.` : dispatcher?.stale_reason || "The hosted dispatcher is unhealthy. Run the manual dispatcher workflow to resume queued work. Saved checkpoints are retained." )}</p>
         </div>
-        {(queueHealth?.runnable_jobs ?? 0) > 0 && <button onClick={onWake} className="text-sm text-sky-200 underline">Resume this account's jobs now</button>}
+        {(queueHealth?.active_jobs ?? queueHealth?.runnable_jobs ?? 0) > 0 && <button onClick={onWake} className="text-sm text-sky-200 underline">Resume this account's jobs now</button>}
       </div>}
       {activeJobs.map((job) => {
         const hasKnownTotal = job.total_items > 0;

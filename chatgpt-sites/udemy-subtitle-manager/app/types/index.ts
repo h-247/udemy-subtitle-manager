@@ -134,7 +134,7 @@ export interface RuntimeHealth {
   status: string;
   commit: string;
   dispatcher: DispatcherHealth | null;
-  queue: { oldest_queued_at: string | null; oldest_queued_age_seconds: number; runnable_jobs: number; overdue_runnable_jobs: number; stalled_jobs: number };
+  queue: { oldest_queued_at: string | null; oldest_queued_age_seconds: number; active_jobs: number; runnable_jobs: number; overdue_runnable_jobs: number; stalled_jobs: number };
 }
 
 export interface DriveStatus {

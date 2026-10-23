@@ -6,7 +6,7 @@ const runtime = await createRuntime();
 try {
   await runtime.seed();
   const missingHeartbeat = await (await runtime.request('/api/health')).json();
-  assert.equal(missingHeartbeat.status,'degraded');
+  assert.equal(missingHeartbeat.status,'ok','an unused manual dispatcher is not degraded while the queue is empty');
   assert.equal(missingHeartbeat.dispatcher.status,'NEVER_RUN');
   assert.equal(missingHeartbeat.dispatcher.stale,true);
   assert.match(missingHeartbeat.dispatcher.stale_reason,/No valid dispatcher heartbeat/);
@@ -97,12 +97,13 @@ try {
   assert.equal(recoveredHealth.status,'ok');
   assert.equal(recoveredHealth.dispatcher.status,'SUCCEEDED');
   assert.ok(recoveredHealth.dispatcher.heartbeat_at);
+  await runtime.db.prepare(`INSERT INTO processing_jobs(user_id,course_id,job_type,total_items,payload_json) VALUES(1,1,'SUBTITLE_BATCH',1,'{"lecture_ids":[1],"language":"en","cursor":0}')`).run();
   await runtime.db.prepare("UPDATE dispatcher_status SET heartbeat_at=datetime('now','-20 minutes') WHERE id=1").run();
   const staleSuccess = await (await runtime.request('/api/health')).json();
   assert.equal(staleSuccess.status,'degraded','a stopped dispatcher is detected after a successful run');
   assert.equal(staleSuccess.dispatcher.status,'SUCCEEDED');
   assert.equal(staleSuccess.dispatcher.stale,true);
-  assert.match(staleSuccess.dispatcher.stale_reason,/hosted dispatcher may have stopped/);
+  assert.match(staleSuccess.dispatcher.stale_reason,/manual hosted dispatcher/);
   await runtime.dispatch();
   assert.equal((await (await runtime.request('/api/health')).json()).status,'ok','a fresh heartbeat clears dispatcher degradation');
   console.log('PASS: workerd/D1/R2 overlapping dispatch, disk restart, expired lease, Drive-only retry, lost upload confirmation, caption reuse, user isolation');

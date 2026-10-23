@@ -1245,6 +1245,7 @@ async function api(request: Request) {
     const [dispatcher, queue] = await Promise.all([
       db().prepare("SELECT * FROM dispatcher_status WHERE id=1").first<Row>(),
       db().prepare(`SELECT MIN(CASE WHEN retry_at IS NULL OR retry_at<=unixepoch() THEN created_at END) AS oldest_queued_at,
+        SUM(CASE WHEN status IN ('PENDING','PROCESSING') THEN 1 ELSE 0 END) AS active_jobs,
         SUM(CASE WHEN retry_at IS NULL OR retry_at<=unixepoch() THEN 1 ELSE 0 END) AS runnable_jobs,
         SUM(CASE WHEN (retry_at IS NULL OR retry_at<=unixepoch()) AND updated_at<=datetime('now','-15 minutes') THEN 1 ELSE 0 END) AS overdue_runnable_jobs
         FROM processing_jobs WHERE status IN ('PENDING','PROCESSING')`).first<Row>(),
@@ -1253,10 +1254,11 @@ async function api(request: Request) {
     const stale = !Number.isFinite(heartbeatAgeMs) || heartbeatAgeMs > 15 * 60_000;
     const dispatcherFailed = dispatcher?.status === "FAILED";
     const overdueRunnableJobs = Number(queue?.overdue_runnable_jobs || 0);
-    const degraded = stale || dispatcherFailed || overdueRunnableJobs > 0;
+    const activeJobs = Number(queue?.active_jobs || 0);
+    const degraded = (stale && activeJobs > 0) || dispatcherFailed || overdueRunnableJobs > 0;
     const staleReason = !dispatcher?.heartbeat_at || !Number.isFinite(heartbeatAgeMs) ? "No valid dispatcher heartbeat has been recorded." : stale
       ? dispatcher.status === "RUNNING" ? "The running dispatcher heartbeat is older than 15 minutes."
-        : "The last dispatcher heartbeat is older than 15 minutes; the hosted dispatcher may have stopped."
+        : "The last dispatcher heartbeat is older than 15 minutes; run the manual hosted dispatcher to resume queued work."
       : null;
     return json({ status: degraded ? "degraded" : "ok", commit: releaseCommit,
       dispatcher: dispatcher ? { status: dispatcher.status, heartbeat_at: dispatcher.heartbeat_at,
@@ -1268,7 +1270,7 @@ async function api(request: Request) {
         },
       queue: { oldest_queued_at: queue?.oldest_queued_at ?? null,
         oldest_queued_age_seconds: queue?.oldest_queued_at ? Math.max(0, Math.floor(Date.now() / 1000 - Date.parse(`${queue.oldest_queued_at}Z`) / 1000)) : 0,
-        runnable_jobs: Number(queue?.runnable_jobs || 0), overdue_runnable_jobs: overdueRunnableJobs,
+        active_jobs: activeJobs, runnable_jobs: Number(queue?.runnable_jobs || 0), overdue_runnable_jobs: overdueRunnableJobs,
         stalled_jobs: overdueRunnableJobs },
     });
   }
