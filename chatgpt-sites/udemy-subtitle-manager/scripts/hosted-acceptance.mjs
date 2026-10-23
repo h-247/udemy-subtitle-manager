@@ -33,7 +33,7 @@ async function scheduledDispatcherEvidence(after, dispatcherStartedAt) {
   const cacheKey = `${after}:${dispatcherStartedAt}`;
   if (scheduleCache.has(cacheKey)) return scheduleCache.get(cacheKey);
   const headers = { Authorization:`Bearer ${githubToken}`, Accept:'application/vnd.github+json', 'X-GitHub-Api-Version':'2022-11-28' };
-  const runResponse = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/jobs.yml/runs?event=schedule&per_page=100&head_sha=${encodeURIComponent(expectedCommit)}`, { headers, signal:AbortSignal.timeout(15_000) });
+  const runResponse = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/hosted-job-scheduler.yml/runs?event=schedule&per_page=100&head_sha=${encodeURIComponent(expectedCommit)}`, { headers, signal:AbortSignal.timeout(15_000) });
   if (!runResponse.ok) throw new Error(`Unable to verify scheduled dispatcher runs: GitHub API HTTP ${runResponse.status}`);
   const { workflow_runs: runs = [] } = await runResponse.json();
   for (const run of runs) {

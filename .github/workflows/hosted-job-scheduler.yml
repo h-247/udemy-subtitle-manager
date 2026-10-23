@@ -1,0 +1,23 @@
+name: Hosted job dispatcher
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: hosted-job-dispatcher
+  cancel-in-progress: false
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node chatgpt-sites/udemy-subtitle-manager/scripts/dispatch-jobs.mjs
+        env:
+          SITE_URL: https://udemy-subtitle-manager.h-247.chatgpt.site
+          SITE_SERVICE_TOKEN: ${{ secrets.SITE_SERVICE_TOKEN }}
+          JOB_RUNNER_SECRET: ${{ secrets.JOB_RUNNER_SECRET }}
