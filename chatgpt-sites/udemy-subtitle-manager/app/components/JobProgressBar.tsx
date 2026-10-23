@@ -25,8 +25,8 @@ export default function JobProgressBar({ jobs, onCancelJob, onReconnect, onWake,
   return (
     <div className="space-y-3 mb-6">
       {runtimeDegraded && <div role="alert" className="p-4 bg-rose-500/10 border border-rose-500/30 rounded-2xl flex flex-wrap items-center justify-between gap-3">
-        <div><p className="text-sm font-semibold text-rose-200">{dispatcherFailed ? "Last background dispatcher run failed" : queuedWorkStalled ? "Runnable background jobs are overdue" : "Background scheduler heartbeat is missing or stale"}</p>
-          <p className="text-xs text-rose-200/80">{dispatcher?.error || (queuedWorkStalled ? `${queueHealth?.overdue_runnable_jobs ?? queueHealth?.stalled_jobs ?? 0} runnable job(s) have had no progress for at least 15 minutes. Saved checkpoints are retained.` : dispatcher?.stale_reason || "The scheduled runner is unhealthy. Saved checkpoints are retained." )}</p>
+        <div><p className="text-sm font-semibold text-rose-200">{dispatcherFailed ? "Last background dispatcher run failed" : queuedWorkStalled ? "Runnable background jobs are overdue" : "Background dispatcher heartbeat is missing or stale"}</p>
+          <p className="text-xs text-rose-200/80">{dispatcher?.error || (queuedWorkStalled ? `${queueHealth?.overdue_runnable_jobs ?? queueHealth?.stalled_jobs ?? 0} runnable job(s) have had no progress for at least 15 minutes. Saved checkpoints are retained.` : dispatcher?.stale_reason || "The hosted dispatcher is unhealthy. Run the manual dispatcher workflow to resume queued work. Saved checkpoints are retained." )}</p>
         </div>
         {(queueHealth?.runnable_jobs ?? 0) > 0 && <button onClick={onWake} className="text-sm text-sky-200 underline">Resume this account's jobs now</button>}
       </div>}

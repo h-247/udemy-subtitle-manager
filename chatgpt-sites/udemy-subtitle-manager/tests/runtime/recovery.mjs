@@ -99,12 +99,12 @@ try {
   assert.ok(recoveredHealth.dispatcher.heartbeat_at);
   await runtime.db.prepare("UPDATE dispatcher_status SET heartbeat_at=datetime('now','-20 minutes') WHERE id=1").run();
   const staleSuccess = await (await runtime.request('/api/health')).json();
-  assert.equal(staleSuccess.status,'degraded','a stopped scheduler is detected after a successful run');
+  assert.equal(staleSuccess.status,'degraded','a stopped dispatcher is detected after a successful run');
   assert.equal(staleSuccess.dispatcher.status,'SUCCEEDED');
   assert.equal(staleSuccess.dispatcher.stale,true);
-  assert.match(staleSuccess.dispatcher.stale_reason,/scheduled runner may have stopped/);
+  assert.match(staleSuccess.dispatcher.stale_reason,/hosted dispatcher may have stopped/);
   await runtime.dispatch();
-  assert.equal((await (await runtime.request('/api/health')).json()).status,'ok','a fresh heartbeat clears scheduler degradation');
+  assert.equal((await (await runtime.request('/api/health')).json()).status,'ok','a fresh heartbeat clears dispatcher degradation');
   console.log('PASS: workerd/D1/R2 overlapping dispatch, disk restart, expired lease, Drive-only retry, lost upload confirmation, caption reuse, user isolation');
 } finally { await runtime.close(); }
 

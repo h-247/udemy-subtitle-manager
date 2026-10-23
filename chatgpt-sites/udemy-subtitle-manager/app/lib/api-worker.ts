@@ -1256,7 +1256,7 @@ async function api(request: Request) {
     const degraded = stale || dispatcherFailed || overdueRunnableJobs > 0;
     const staleReason = !dispatcher?.heartbeat_at || !Number.isFinite(heartbeatAgeMs) ? "No valid dispatcher heartbeat has been recorded." : stale
       ? dispatcher.status === "RUNNING" ? "The running dispatcher heartbeat is older than 15 minutes."
-        : "The last dispatcher heartbeat is older than 15 minutes; the scheduled runner may have stopped."
+        : "The last dispatcher heartbeat is older than 15 minutes; the hosted dispatcher may have stopped."
       : null;
     return json({ status: degraded ? "degraded" : "ok", commit: releaseCommit,
       dispatcher: dispatcher ? { status: dispatcher.status, heartbeat_at: dispatcher.heartbeat_at,
